@@ -1,9 +1,11 @@
-import { useState } from 'react'
-import { submitVideo, watchTask } from '../api/client'
+import { useEffect, useState } from 'react'
+import { checkDuplicate, submitVideo, watchTask } from '../api/client'
 import type { ProcessingEvent, Video } from '../types'
 
 interface Props {
   onDone: (video: Video) => void
+  prefillUrl?: string
+  onClearPrefill?: () => void
 }
 
 const PLATFORMS = [
@@ -42,24 +44,38 @@ const STEP_LABELS: Record<string, string> = {
   ping: '处理中',
 }
 
-export default function VideoInput({ onDone }: Props) {
+export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props) {
   const [platform, setPlatform] = useState<string | null>(null)
   const [url, setUrl] = useState('')
   const [event, setEvent] = useState<ProcessingEvent | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [dupVideo, setDupVideo] = useState<Video | null>(null)
+
+  // Auto-fill from recommendation panel
+  useEffect(() => {
+    if (!prefillUrl) return
+    const detected = prefillUrl.includes('youtube.com') || prefillUrl.includes('youtu.be')
+      ? 'youtube'
+      : prefillUrl.includes('bilibili.com')
+      ? 'bilibili'
+      : 'generic'
+    setPlatform(detected)
+    setUrl(prefillUrl)
+    setError('')
+    setDupVideo(null)
+    onClearPrefill?.()
+  }, [prefillUrl])
 
   const selectedPlatform = PLATFORMS.find((p) => p.id === platform)
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!url.trim() || !platform) return
+  const startProcessing = async (targetUrl: string, targetPlatform: string) => {
+    setDupVideo(null)
     setError('')
     setLoading(true)
     setEvent({ step: 'extracting', progress: 0, message: '提交中…' })
-
     try {
-      const taskId = await submitVideo(url.trim(), platform)
+      const taskId = await submitVideo(targetUrl, targetPlatform)
       const stop = watchTask(taskId, (ev) => {
         setEvent(ev)
         if (ev.step === 'done' && ev.video) {
@@ -80,12 +96,24 @@ export default function VideoInput({ onDone }: Props) {
     }
   }
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!url.trim() || !platform) return
+    const { duplicate, video } = await checkDuplicate(url.trim())
+    if (duplicate && video) {
+      setDupVideo(video)
+      return
+    }
+    await startProcessing(url.trim(), platform)
+  }
+
   const handleReset = () => {
     if (loading) return
     setPlatform(null)
     setUrl('')
     setEvent(null)
     setError('')
+    setDupVideo(null)
   }
 
   return (
@@ -106,7 +134,7 @@ export default function VideoInput({ onDone }: Props) {
                 key={p.id}
                 type="button"
                 disabled={loading}
-                onClick={() => { setPlatform(p.id); setUrl(''); setError('') }}
+                onClick={() => { setPlatform(p.id); setUrl(''); setError(''); setDupVideo(null) }}
                 className={`flex-1 flex flex-col items-center gap-1 py-3 px-2 rounded-xl border-2
                   transition-all text-sm font-medium disabled:opacity-50
                   ${isActive ? p.activeColor + ' scale-[1.03]' : p.color + ' hover:border-gray-500'}`}
@@ -119,7 +147,7 @@ export default function VideoInput({ onDone }: Props) {
         </div>
       </div>
 
-      {/* Step 2: URL input — only shown after platform selected */}
+      {/* Step 2: URL input */}
       {platform && (
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <p className="text-xs text-gray-500 uppercase tracking-wide">
@@ -129,7 +157,7 @@ export default function VideoInput({ onDone }: Props) {
             <input
               type="url"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => { setUrl(e.target.value); setDupVideo(null) }}
               placeholder={selectedPlatform?.placeholder}
               disabled={loading}
               autoFocus
@@ -159,8 +187,30 @@ export default function VideoInput({ onDone }: Props) {
         </form>
       )}
 
+      {/* Duplicate warning */}
+      {dupVideo && (
+        <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-4">
+          <p className="text-sm font-medium text-yellow-300 mb-1">该视频已在知识库中</p>
+          <p className="text-xs text-yellow-500 mb-3 truncate">「{dupVideo.title}」</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => startProcessing(url.trim(), platform!)}
+              className="px-3 py-1.5 text-xs bg-yellow-700 hover:bg-yellow-600 text-white rounded-lg"
+            >
+              重新处理并覆盖
+            </button>
+            <button
+              onClick={() => setDupVideo(null)}
+              className="px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Progress */}
-      {event && event.step !== 'ping' && (
+      {event && event.step !== 'ping' && !dupVideo && (
         <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex justify-between items-center mb-2">
             <span className="text-sm font-medium text-gray-300">

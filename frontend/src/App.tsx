@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react'
 import VideoInput from './components/VideoInput'
 import VideoLibrary from './components/VideoLibrary'
 import ChatInterface from './components/ChatInterface'
+import NoteEditor from './components/NoteEditor'
+import StatsPanel from './components/StatsPanel'
+import ReviewPanel from './components/ReviewPanel'
+import RecommendationsPanel from './components/RecommendationsPanel'
+import ArticlePanel from './components/ArticlePanel'
 import { fetchVideos } from './api/client'
 import type { ActiveTab, Video } from './types'
 
@@ -9,11 +14,10 @@ export default function App() {
   const [videos, setVideos] = useState<Video[]>([])
   const [activeTab, setActiveTab] = useState<ActiveTab>('add')
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null)
+  const [prefillUrl, setPrefillUrl] = useState('')
 
   useEffect(() => {
-    fetchVideos()
-      .then(setVideos)
-      .catch(console.error)
+    fetchVideos().then(setVideos).catch(console.error)
   }, [])
 
   const handleNewVideo = (video: Video) => {
@@ -25,8 +29,17 @@ export default function App() {
 
   const handleSelectVideo = (video: Video) => {
     setSelectedVideo(video)
-    setActiveTab('chat')
+    setActiveTab('note')
   }
+
+  const TABS: { id: ActiveTab; label: string; disabled?: boolean }[] = [
+    { id: 'add', label: '添加视频' },
+    { id: 'chat', label: '知识对话' },
+    { id: 'note', label: '笔记', disabled: !selectedVideo },
+    { id: 'article', label: '综合文章' },
+    { id: 'review', label: '复盘' },
+    { id: 'stats', label: '统计' },
+  ]
 
   return (
     <div className="flex h-screen bg-gray-900 text-white overflow-hidden">
@@ -49,32 +62,58 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0">
         {/* Tabs */}
         <div className="flex border-b border-gray-800 px-6 shrink-0">
-          {(['add', 'chat'] as const).map((tab) => (
+          {TABS.map((tab) => (
             <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-4 py-3.5 text-sm font-medium border-b-2 transition-colors -mb-px ${
-                activeTab === tab
+              key={tab.id}
+              onClick={() => !tab.disabled && setActiveTab(tab.id)}
+              disabled={tab.disabled}
+              className={`px-4 py-3.5 text-sm font-medium border-b-2 transition-colors -mb-px disabled:opacity-30 disabled:cursor-not-allowed ${
+                activeTab === tab.id
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-gray-500 hover:text-gray-300'
               }`}
             >
-              {tab === 'add' ? '添加视频' : '知识对话'}
+              {tab.label}
+              {tab.id === 'note' && selectedVideo && (
+                <span className="ml-1.5 text-[10px] text-gray-500 truncate max-w-[100px] inline-block align-middle">
+                  · {selectedVideo.title.slice(0, 12)}…
+                </span>
+              )}
             </button>
           ))}
         </div>
 
         {/* Content */}
         <div className="flex-1 overflow-hidden p-6 min-h-0">
-          {activeTab === 'add' ? (
-            <div className="max-w-2xl">
-              <VideoInput onDone={handleNewVideo} />
+          {activeTab === 'add' && (
+            <div className="max-w-2xl space-y-5 overflow-y-auto h-full pb-4">
+              <VideoInput
+                onDone={handleNewVideo}
+                prefillUrl={prefillUrl}
+                onClearPrefill={() => setPrefillUrl('')}
+              />
+              <RecommendationsPanel
+                hasVideos={videos.length > 0}
+                onAddVideo={(url) => setPrefillUrl(url)}
+              />
             </div>
-          ) : (
+          )}
+          {activeTab === 'chat' && (
             <div className="h-full flex flex-col">
               <ChatInterface suggestedVideo={selectedVideo} />
             </div>
           )}
+          {activeTab === 'note' && selectedVideo && (
+            <NoteEditor
+              key={selectedVideo.id}
+              video={selectedVideo}
+              allVideos={videos}
+              onSelectVideo={handleSelectVideo}
+            />
+          )}
+          {activeTab === 'stats' && <StatsPanel />}
+          {activeTab === 'article' && <ArticlePanel />}
+          {activeTab === 'review' && <ReviewPanel />}
         </div>
       </main>
     </div>

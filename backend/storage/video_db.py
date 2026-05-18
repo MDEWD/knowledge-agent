@@ -33,6 +33,16 @@ def get_video(video_id: str) -> Optional[dict]:
     return next((v for v in _load() if v.get("id") == video_id), None)
 
 
+def update_video_note(video_id: str, new_insights: str) -> bool:
+    videos = _load()
+    for v in videos:
+        if v.get("id") == video_id:
+            v["insights"] = new_insights
+            _save(videos)
+            return True
+    return False
+
+
 def delete_video(video_id: str) -> bool:
     videos = _load()
     new_videos = [v for v in videos if v.get("id") != video_id]
