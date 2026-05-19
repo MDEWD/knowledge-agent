@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { deleteVideo } from '../api/client'
-import type { Video } from '../types'
+import type { ImportedNote, Video } from '../types'
 
 interface Props {
   videos: Video[]
   onDelete: (id: string) => void
   onSelectVideo?: (video: Video) => void
+  notes?: ImportedNote[]
+  onSelectNote?: (note: ImportedNote) => void
 }
 
 const PLATFORM_ICON: Record<string, string> = {
@@ -26,7 +28,7 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 
-export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props) {
+export default function VideoLibrary({ videos, onDelete, onSelectVideo, notes = [], onSelectNote }: Props) {
   const [search, setSearch] = useState('')
   const [activeCategory, setActiveCategory] = useState<string | null>(null)
   const [sortDesc, setSortDesc] = useState(true)
@@ -66,7 +68,7 @@ export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props)
     <div className="flex flex-col h-full gap-2">
       <div className="flex items-center justify-between shrink-0">
         <h2 className="text-sm font-semibold text-gray-300">
-          知识库 <span className="text-gray-500 font-normal">({videos.length})</span>
+          知识库 <span className="text-gray-500 font-normal">({videos.length + notes.length})</span>
         </h2>
         <button
           onClick={() => setSortDesc((d) => !d)}
@@ -161,6 +163,36 @@ export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props)
             </button>
           </div>
         ))}
+
+        {notes.length > 0 && (
+          <>
+            <div className="pt-2 pb-1 px-0.5">
+              <p className="text-[10px] text-gray-600 uppercase tracking-wide">导入笔记 ({notes.length})</p>
+            </div>
+            {notes.map((note) => (
+              <div
+                key={note.id}
+                onClick={() => onSelectNote?.(note)}
+                className="flex items-start gap-2.5 p-2.5 rounded-lg hover:bg-gray-800
+                  cursor-pointer transition-colors border border-transparent hover:border-gray-700"
+              >
+                <span className="text-base mt-0.5 shrink-0">📝</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-gray-200 truncate leading-tight">{note.title}</p>
+                  <p className="text-xs text-gray-500 mt-0.5 truncate">
+                    {note.file_type.toUpperCase()} · {note.word_count >= 1000 ? `${(note.word_count / 1000).toFixed(1)}k` : note.word_count} 字
+                    {' · '}{formatDate(note.created_at)}
+                  </p>
+                  {note.category && (
+                    <span className="text-[10px] bg-purple-900/40 text-purple-400 px-1.5 py-0.5 rounded mt-1 inline-block">
+                      {note.category}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   )

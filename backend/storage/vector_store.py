@@ -1,4 +1,5 @@
 import hashlib
+import re
 from typing import Optional
 
 import chromadb
@@ -28,6 +29,50 @@ def _get_collection() -> chromadb.Collection:
 def add_document(insights: str, metadata: dict) -> None:
     col = _get_collection()
     chunks = [p.strip() for p in insights.split("\n\n") if len(p.strip()) > 40]
+
+    ids, docs, metas, bm25_items = [], [], [], []
+    for i, chunk in enumerate(chunks):
+        doc_id = hashlib.md5(f"{metadata['url']}_{i}".encode()).hexdigest()
+        chunk_meta = {
+            "title": metadata.get("title", ""),
+            "url": metadata.get("url", ""),
+            "channel": metadata.get("channel", ""),
+            "platform": metadata.get("platform", ""),
+            "video_id": metadata.get("id", ""),
+            "chunk_index": i,
+        }
+        ids.append(doc_id)
+        docs.append(chunk)
+        metas.append(chunk_meta)
+        bm25_items.append({"id": doc_id, "text": chunk, "metadata": chunk_meta})
+
+    col.upsert(ids=ids, documents=docs, metadatas=metas)
+    bm25_store.add_documents(bm25_items)
+
+
+def add_note_document(text: str, metadata: dict) -> None:
+    """Index note text with sentence-aware chunking (~500 chars per chunk)."""
+    col = _get_collection()
+
+    # Split on Chinese/English sentence endings, keeping the delimiter
+    raw = re.split(r'(?<=[。！？.!?])\s*', text)
+    chunks: list[str] = []
+    current = ""
+    for sent in raw:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if len(current) + len(sent) + 1 <= 500:
+            current = (current + " " + sent).strip()
+        else:
+            if len(current) > 30:
+                chunks.append(current)
+            current = sent
+    if len(current) > 30:
+        chunks.append(current)
+
+    if not chunks:
+        return
 
     ids, docs, metas, bm25_items = [], [], [], []
     for i, chunk in enumerate(chunks):

@@ -11,7 +11,7 @@ def _extract_video_id(url: str) -> str:
     raise ValueError(f"Cannot parse YouTube video ID from: {url}")
 
 
-_BASE_OPTS = {"quiet": True, "no_warnings": True, "nocheckcertificate": True}
+_BASE_OPTS = {"quiet": True, "no_warnings": True, "nocheckcertificate": True, "legacy_server_connect": True}
 
 
 def _get_metadata(url: str) -> dict:

@@ -16,6 +16,7 @@ const PLATFORMS = [
     placeholder: 'https://www.youtube.com/watch?v=...',
     color: 'border-red-600 bg-red-600/10 text-red-400',
     activeColor: 'border-red-500 bg-red-500/20 text-red-300',
+    showTranslateToggle: true,
   },
   {
     id: 'bilibili',
@@ -24,6 +25,7 @@ const PLATFORMS = [
     placeholder: 'https://www.bilibili.com/video/BV...',
     color: 'border-pink-600 bg-pink-600/10 text-pink-400',
     activeColor: 'border-pink-500 bg-pink-500/20 text-pink-300',
+    showTranslateToggle: false,
   },
   {
     id: 'generic',
@@ -32,12 +34,14 @@ const PLATFORMS = [
     placeholder: '粘贴视频链接（支持 Twitter/X、Vimeo、TikTok 等）',
     color: 'border-gray-600 bg-gray-700/30 text-gray-400',
     activeColor: 'border-blue-500 bg-blue-500/10 text-blue-300',
+    showTranslateToggle: true,
   },
 ]
 
 const STEP_LABELS: Record<string, string> = {
   extracting: '提取字幕',
   processing: '提炼观点',
+  diarizing: '识别说话人',
   saving: '写入存储',
   done: '完成',
   error: '出错',
@@ -47,12 +51,13 @@ const STEP_LABELS: Record<string, string> = {
 export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props) {
   const [platform, setPlatform] = useState<string | null>(null)
   const [url, setUrl] = useState('')
+  const [translate, setTranslate] = useState(false)
+  const [diarize, setDiarize] = useState(false)
   const [event, setEvent] = useState<ProcessingEvent | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [dupVideo, setDupVideo] = useState<Video | null>(null)
 
-  // Auto-fill from recommendation panel
   useEffect(() => {
     if (!prefillUrl) return
     const detected = prefillUrl.includes('youtube.com') || prefillUrl.includes('youtu.be')
@@ -64,6 +69,7 @@ export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props
     setUrl(prefillUrl)
     setError('')
     setDupVideo(null)
+    setDiarize(false)
     onClearPrefill?.()
   }, [prefillUrl])
 
@@ -75,7 +81,7 @@ export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props
     setLoading(true)
     setEvent({ step: 'extracting', progress: 0, message: '提交中…' })
     try {
-      const taskId = await submitVideo(targetUrl, targetPlatform)
+      const taskId = await submitVideo(targetUrl, targetPlatform, translate, diarize)
       const stop = watchTask(taskId, (ev) => {
         setEvent(ev)
         if (ev.step === 'done' && ev.video) {
@@ -114,6 +120,7 @@ export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props
     setEvent(null)
     setError('')
     setDupVideo(null)
+    setDiarize(false)
   }
 
   return (
@@ -147,7 +154,7 @@ export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props
         </div>
       </div>
 
-      {/* Step 2: URL input */}
+      {/* Step 2: URL input + translate toggle */}
       {platform && (
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <p className="text-xs text-gray-500 uppercase tracking-wide">
@@ -184,6 +191,47 @@ export default function VideoInput({ onDone, prefillUrl, onClearPrefill }: Props
               </button>
             )}
           </div>
+
+          {/* Translate toggle — only for non-Chinese platforms */}
+          {selectedPlatform?.showTranslateToggle && (
+            <button
+              type="button"
+              onClick={() => setTranslate((v) => !v)}
+              disabled={loading}
+              className={`flex items-center gap-2.5 self-start px-3 py-2 rounded-lg border transition-colors text-xs
+                disabled:opacity-50 ${
+                  translate
+                    ? 'border-blue-500 bg-blue-600/15 text-blue-300'
+                    : 'border-gray-700 bg-gray-800 text-gray-500 hover:border-gray-600 hover:text-gray-400'
+                }`}
+            >
+              {/* Toggle pill */}
+              <span className={`relative inline-flex w-8 h-4 rounded-full transition-colors ${translate ? 'bg-blue-500' : 'bg-gray-600'}`}>
+                <span className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full shadow transition-transform ${translate ? 'translate-x-4' : ''}`} />
+              </span>
+              <span>翻译为中文</span>
+              {!translate && <span className="text-gray-600">（当前：保留原文）</span>}
+            </button>
+          )}
+
+          {/* Diarize toggle — multi-speaker conversation labeling */}
+          <button
+            type="button"
+            onClick={() => setDiarize((v) => !v)}
+            disabled={loading}
+            className={`flex items-center gap-2.5 self-start px-3 py-2 rounded-lg border transition-colors text-xs
+              disabled:opacity-50 ${
+                diarize
+                  ? 'border-purple-500 bg-purple-600/15 text-purple-300'
+                  : 'border-gray-700 bg-gray-800 text-gray-500 hover:border-gray-600 hover:text-gray-400'
+              }`}
+          >
+            <span className={`relative inline-flex w-8 h-4 rounded-full transition-colors ${diarize ? 'bg-purple-500' : 'bg-gray-600'}`}>
+              <span className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full shadow transition-transform ${diarize ? 'translate-x-4' : ''}`} />
+            </span>
+            <span>识别说话人</span>
+            {!diarize && <span className="text-gray-600">（当前：不标注）</span>}
+          </button>
         </form>
       )}
 

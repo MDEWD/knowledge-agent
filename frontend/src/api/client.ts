@@ -1,4 +1,4 @@
-import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation } from '../types'
+import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote } from '../types'
 
 const BASE = '/api'
 
@@ -8,11 +8,11 @@ export async function checkDuplicate(url: string): Promise<{ duplicate: boolean;
   return res.json()
 }
 
-export async function submitVideo(url: string, platform: string): Promise<string> {
+export async function submitVideo(url: string, platform: string, translate: boolean, diarize: boolean): Promise<string> {
   const res = await fetch(`${BASE}/process-video`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, platform }),
+    body: JSON.stringify({ url, platform, translate, diarize }),
   })
   if (!res.ok) throw new Error(await res.text())
   const data = await res.json()
@@ -151,6 +151,7 @@ type ChatEvent =
   | { type: 'text'; content: string }
   | { type: 'tool_use'; tool: string; label: string }
   | { type: 'suggestions'; videos: YoutubeVideoSuggestion[] }
+  | { type: 'citations'; sources: CitationSource[] }
   | { type: 'done' }
 
 export async function* streamChat(
@@ -184,3 +185,105 @@ export async function* streamChat(
     }
   }
 }
+
+// ── Active Recall ─────────────────────────────────────────────────────────────
+
+export async function generateRecallCards(videoId: string, count = 5): Promise<RecallCard[]> {
+  const res = await fetch(`${BASE}/recall/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_id: videoId, count }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json()
+  return data.cards as RecallCard[]
+}
+
+export async function fetchDueCards(): Promise<{ cards: RecallCard[]; stats: RecallStats }> {
+  const res = await fetch(`${BASE}/recall/due`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function fetchAllCards(): Promise<{ cards: RecallCard[]; stats: RecallStats }> {
+  const res = await fetch(`${BASE}/recall/all`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function reviewRecallCard(cardId: string, quality: number): Promise<RecallCard> {
+  const res = await fetch(`${BASE}/recall/review/${cardId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quality }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteRecallCards(videoId: string): Promise<void> {
+  const res = await fetch(`${BASE}/recall/video/${videoId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+// ── Knowledge Graph ───────────────────────────────────────────────────────────
+
+export async function fetchGraph(): Promise<KnowledgeGraph> {
+  const res = await fetch(`${BASE}/graph`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function rebuildGraph(): Promise<KnowledgeGraph> {
+  const res = await fetch(`${BASE}/graph/rebuild`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Long-term Memory ──────────────────────────────────────────────────────────
+
+export async function fetchMemory(): Promise<UserMemory> {
+  const res = await fetch(`${BASE}/memory`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateMemory(mem: Partial<UserMemory>): Promise<UserMemory> {
+  const res = await fetch(`${BASE}/memory`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(mem),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function resetMemory(): Promise<UserMemory> {
+  const res = await fetch(`${BASE}/memory/reset`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Note Import ───────────────────────────────────────────────────────────────
+
+export async function importNotes(
+  files: File[],
+): Promise<{ tasks: { task_id: string; filename: string }[] }> {
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f)
+  const res = await fetch(`${BASE}/notes/import`, { method: 'POST', body: fd })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function fetchImportedNotes(): Promise<ImportedNote[]> {
+  const res = await fetch(`${BASE}/notes`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteImportedNote(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/notes/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+

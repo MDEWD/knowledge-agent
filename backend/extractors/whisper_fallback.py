@@ -57,6 +57,7 @@ def transcribe(url: str) -> str:
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
+            "legacy_server_connect": True,
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])

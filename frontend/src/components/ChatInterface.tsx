@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { streamChat } from '../api/client'
-import type { ChatMessage, Video, YoutubeVideoSuggestion } from '../types'
+import type { ChatMessage, CitationSource, Video, YoutubeVideoSuggestion } from '../types'
 
 let _idCounter = 0
 const nextId = () => String(++_idCounter)
@@ -69,6 +69,19 @@ export default function ChatInterface({ suggestedVideo }: Props) {
             ),
           )
           setToolActivity('')
+        } else if (event.type === 'citations') {
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== assistantId) return m
+              const existing = m.citations ?? []
+              const existingUrls = new Set(existing.map((c) => c.url))
+              const fresh = event.sources.filter((s) => !existingUrls.has(s.url))
+              if (!fresh.length) return m
+              // Renumber globally so indices are continuous across multiple tool calls
+              const reindexed = fresh.map((s, i) => ({ ...s, index: existing.length + i + 1 }))
+              return { ...m, citations: [...existing, ...reindexed] }
+            }),
+          )
         }
       }
     } catch (err) {
@@ -134,6 +147,18 @@ export default function ChatInterface({ suggestedVideo }: Props) {
                 </div>
               </div>
             )}
+
+            {/* Citation sources panel */}
+            {msg.citations && msg.citations.length > 0 && (
+              <div className="ml-9 mt-2">
+                <p className="text-xs text-gray-500 mb-1.5">参考来源</p>
+                <div className="flex flex-col gap-1">
+                  {msg.citations.map((c) => (
+                    <CitationCard key={c.index} source={c} />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ))}
 
@@ -178,6 +203,34 @@ export default function ChatInterface({ suggestedVideo }: Props) {
         </div>
       </div>
     </div>
+  )
+}
+
+function CitationCard({ source }: { source: CitationSource }) {
+  return (
+    <a
+      href={source.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-center gap-2.5 bg-gray-850 border border-gray-700/60 rounded-lg px-3 py-2
+        hover:border-blue-500/50 hover:bg-gray-800 transition-colors group"
+    >
+      <span className="shrink-0 w-5 h-5 rounded bg-gray-700 flex items-center justify-center
+        text-[10px] font-bold text-gray-400 group-hover:text-blue-400 group-hover:bg-blue-900/30">
+        {source.index}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-gray-300 group-hover:text-white truncate leading-snug">
+          {source.title}
+        </p>
+        {source.channel && (
+          <p className="text-[11px] text-gray-500 truncate">{source.channel}</p>
+        )}
+      </div>
+      <svg className="w-3 h-3 text-gray-600 group-hover:text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+      </svg>
+    </a>
   )
 }
 

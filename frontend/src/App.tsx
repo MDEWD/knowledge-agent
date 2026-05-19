@@ -7,17 +7,23 @@ import StatsPanel from './components/StatsPanel'
 import ReviewPanel from './components/ReviewPanel'
 import RecommendationsPanel from './components/RecommendationsPanel'
 import ArticlePanel from './components/ArticlePanel'
-import { fetchVideos } from './api/client'
-import type { ActiveTab, Video } from './types'
+import RecallPanel from './components/RecallPanel'
+import GraphPanel from './components/GraphPanel'
+import MemorySidebar from './components/MemorySidebar'
+import NoteImportPanel from './components/NoteImportPanel'
+import { fetchVideos, fetchImportedNotes } from './api/client'
+import type { ActiveTab, ImportedNote, Video } from './types'
 
 export default function App() {
   const [videos, setVideos] = useState<Video[]>([])
+  const [importedNotes, setImportedNotes] = useState<ImportedNote[]>([])
   const [activeTab, setActiveTab] = useState<ActiveTab>('add')
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null)
   const [prefillUrl, setPrefillUrl] = useState('')
 
   useEffect(() => {
     fetchVideos().then(setVideos).catch(console.error)
+    fetchImportedNotes().then(setImportedNotes).catch(console.error)
   }, [])
 
   const handleNewVideo = (video: Video) => {
@@ -34,9 +40,12 @@ export default function App() {
 
   const TABS: { id: ActiveTab; label: string; disabled?: boolean }[] = [
     { id: 'add', label: '添加视频' },
+    { id: 'import', label: '导入笔记' },
     { id: 'chat', label: '知识对话' },
     { id: 'note', label: '笔记', disabled: !selectedVideo },
     { id: 'article', label: '综合文章' },
+    { id: 'recall', label: '主动回忆' },
+    { id: 'graph', label: '知识图谱' },
     { id: 'review', label: '复盘' },
     { id: 'stats', label: '统计' },
   ]
@@ -54,8 +63,11 @@ export default function App() {
             videos={videos}
             onDelete={(id) => setVideos((prev) => prev.filter((v) => v.id !== id))}
             onSelectVideo={handleSelectVideo}
+            notes={importedNotes}
+            onSelectNote={() => setActiveTab('import')}
           />
         </div>
+        <MemorySidebar />
       </aside>
 
       {/* Main */}
@@ -114,6 +126,13 @@ export default function App() {
           {activeTab === 'stats' && <StatsPanel />}
           {activeTab === 'article' && <ArticlePanel />}
           {activeTab === 'review' && <ReviewPanel />}
+          {activeTab === 'recall' && <RecallPanel videos={videos} />}
+          {activeTab === 'graph' && <GraphPanel />}
+          {activeTab === 'import' && (
+            <div className="max-w-2xl h-full overflow-y-auto">
+              <NoteImportPanel onNoteAdded={() => fetchImportedNotes().then(setImportedNotes).catch(console.error)} />
+            </div>
+          )}
         </div>
       </main>
     </div>

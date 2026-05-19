@@ -4,16 +4,19 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import asyncio
 import hashlib
 import json
+import re
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -26,7 +29,7 @@ from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
 from processors.insights import extract_insights, parse_category, is_mainly_chinese, translate_to_chinese
 from storage.obsidian import save_to_obsidian, update_obsidian_note
-from storage.vector_store import add_document, delete_document, find_related, search
+from storage.vector_store import add_document, add_note_document, delete_document, find_related, search
 from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note
 
 
@@ -99,6 +102,8 @@ app.add_middleware(
 class ProcessRequest(BaseModel):
     url: str
     platform: str = "generic"
+    translate: bool = False
+    diarize: bool = False
 
 
 class ChatMessage(BaseModel):
@@ -146,7 +151,7 @@ async def _push(task_id: str, event: dict) -> None:
 
 # ── Background pipeline ───────────────────────────────────────────────────────
 
-async def _process_video(task_id: str, url: str, platform: str) -> None:
+async def _process_video(task_id: str, url: str, platform: str, translate: bool = False, diarize: bool = False) -> None:
     try:
         await _push(task_id, {"step": "extracting", "progress": 10, "message": "正在提取字幕…"})
 
@@ -164,10 +169,15 @@ async def _process_video(task_id: str, url: str, platform: str) -> None:
         metadata["id"] = hashlib.md5(url.encode()).hexdigest()[:12]
 
         original_transcript = ""
-        if not is_mainly_chinese(transcript):
+        if translate and not is_mainly_chinese(transcript):
             await _push(task_id, {"step": "processing", "progress": 30, "message": "检测到英文内容，正在翻译字幕…"})
             original_transcript = transcript
             transcript = await loop.run_in_executor(None, translate_to_chinese, transcript)
+
+        if diarize:
+            await _push(task_id, {"step": "processing", "progress": 38, "message": "正在识别说话人…"})
+            from processors.diarization import detect_and_diarize
+            transcript = await loop.run_in_executor(None, detect_and_diarize, transcript)
 
         await _push(task_id, {"step": "processing", "progress": 45, "message": "DeepSeek 正在提炼核心观点…"})
 
@@ -230,6 +240,95 @@ def _reindex_note(video: dict, new_insights: str) -> None:
     add_document(new_insights, video)
 
 
+# ── Note file import pipeline ─────────────────────────────────────────────────
+
+async def _process_note_file(task_id: str, tmp_path: Path, original_name: str) -> None:
+    try:
+        await _push(task_id, {"step": "extracting", "progress": 10, "message": f"正在读取 {original_name}…"})
+        loop = asyncio.get_event_loop()
+        ext = Path(original_name).suffix.lstrip(".").lower()
+
+        from processors.note_importer import extract_text, generate_note_metadata
+        text = await loop.run_in_executor(None, extract_text, tmp_path, ext)
+        if not text.strip():
+            await _push(task_id, {"step": "error", "progress": 0, "message": "无法提取文本内容，请检查文件格式"})
+            return
+
+        await _push(task_id, {"step": "processing", "progress": 40, "message": "AI 正在分析笔记内容…"})
+        title = Path(original_name).stem
+        metadata = await loop.run_in_executor(None, generate_note_metadata, text, title)
+        summary = metadata.get("summary", "")
+        category = metadata.get("category", "其他")
+        tags = metadata.get("tags", [])
+
+        await _push(task_id, {"step": "saving", "progress": 75, "message": "写入 Obsidian 和向量库…"})
+
+        note_id = hashlib.md5(f"{original_name}{text[:200]}".encode()).hexdigest()[:12]
+        note_url = f"note://{note_id}"
+
+        # Save to Obsidian
+        from config import OBSIDIAN_VAULT_PATH
+        note_dir = OBSIDIAN_VAULT_PATH / "导入笔记"
+        note_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = re.sub(r'[<>:"/\\|?*]', "-", title)[:60]
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        obs_path = note_dir / f"{date_str} {safe_title}.md"
+        obs_path.write_text(
+            f"---\ntype: imported_note\ntitle: \"{title}\"\ndate: {date_str}\n"
+            f"source: \"{original_name}\"\ncategory: \"{category}\"\n"
+            f"tags: {json.dumps(tags, ensure_ascii=False)}\n---\n\n"
+            f"## 摘要\n\n{summary}\n\n---\n\n## 原文\n\n{text}",
+            encoding="utf-8",
+        )
+
+        # Index in vector store: sentence-aware chunked for proper retrieval
+        note_meta = {
+            "id": note_id,
+            "title": title,
+            "url": note_url,
+            "channel": original_name,
+            "platform": "note",
+        }
+        full_text_for_index = f"{title}。{summary}\n\n{text}" if summary else f"{title}\n\n{text}"
+        await loop.run_in_executor(None, add_note_document, full_text_for_index, note_meta)
+
+        # Save to notes DB
+        note_record = {
+            "id": note_id,
+            "title": title,
+            "source_file": original_name,
+            "file_type": ext,
+            "content": text,
+            "summary": summary,
+            "category": category,
+            "tags": tags,
+            "obsidian_path": str(obs_path),
+            "created_at": datetime.now().isoformat(),
+            "word_count": len(text),
+            "url": note_url,
+        }
+        from storage.notes_db import add_note as _add_imported_note
+        await loop.run_in_executor(None, _add_imported_note, note_record)
+
+        await _push(task_id, {
+            "step": "done",
+            "progress": 100,
+            "message": "导入完成！",
+            "note": {k: v for k, v in note_record.items() if k != "content"},
+        })
+
+    except Exception as exc:
+        await _push(task_id, {"step": "error", "progress": 0, "message": str(exc)})
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+        task_queues.pop(task_id, None)
+
+
+
 # ── Chat: tools & system prompt ───────────────────────────────────────────────
 
 _CHAT_SYSTEM = """\
@@ -237,13 +336,19 @@ _CHAT_SYSTEM = """\
 
 工具使用策略：
 - 先用 search_knowledge_base 搜索相关内容再回答
-- 用户问"有哪些视频"时，用 list_videos_in_kb 列出
+- 用户问"有哪些视频/笔记/内容"或"导入了什么"时，用 list_videos_in_kb 列出（同时返回视频和导入笔记）
 - 用户问某分类的总结时，用 summarize_category
 - 用户让你对比几个视频时，先用 list_videos_in_kb 找到 ID，再用 compare_videos
 - 知识库中没有相关内容时，用 search_youtube_videos 搜索推荐
 - 用户要求生成综合文章时，用 generate_synthesis_article
 
-回答用中文，引用来源时注明视频标题。
+引用规则（重要）：
+- search_knowledge_base 返回的每段内容前有 [来源N] 编号
+- 回答时在引用该内容的句末加上对应的 [来源N] 标注，例如：「这个方法强调先做减法[来源1]」
+- 同一段内容多次引用只标注一次
+- 没有对应来源的内容不要加标注
+
+回答用中文。
 """
 
 _TOOLS = [
@@ -275,7 +380,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "list_videos_in_kb",
-            "description": "列出知识库中的所有视频，可按分类筛选",
+            "description": "列出知识库中的所有内容（视频和导入笔记），可按分类筛选。用户问「有哪些视频」「导入了什么」「知识库有什么内容」时使用",
             "parameters": {
                 "type": "object",
                 "properties": {"category": {"type": "string", "description": "可选，按分类名称筛选"}},
@@ -370,7 +475,8 @@ async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[d
     return system_msgs + [{"role": "system", "content": f"【对话历史摘要】{summary}"}] + recent
 
 
-async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | None]:
+async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | None, list | None]:
+    """Returns (result_text, youtube_suggestions, citations)."""
     try:
         args = json.loads(arguments)
     except Exception:
@@ -380,40 +486,77 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
         query = args.get("query", "")
         results = await loop.run_in_executor(None, search, query)
         if not results:
-            return "知识库中没有相关内容。", None
-        # Warn the LLM when results may not be genuinely relevant
+            return "知识库中没有相关内容。", None, None
+
         from storage.vector_store import is_topic_covered
         covered = await loop.run_in_executor(None, is_topic_covered, query, 1, 1.0)
+
+        # Build numbered source list (deduplicated by URL)
+        source_map: dict[str, dict] = {}
+        chunks: list[str] = []
+        for r in results:
+            meta = r["metadata"]
+            url = meta.get("url", "")
+            if url not in source_map:
+                source_map[url] = {
+                    "index": len(source_map) + 1,
+                    "title": meta.get("title", ""),
+                    "url": url,
+                    "channel": meta.get("channel", ""),
+                }
+            num = source_map[url]["index"]
+            chunks.append(f"[来源{num}]《{meta.get('title', '')}》\n{r['content']}")
+
+        citations = list(source_map.values())
+        result_text = "\n\n".join(chunks)
         if not covered:
-            return (
-                "【注意：知识库中暂无与该主题高度相关的内容，以下为最近似的结果，相关性可能较低】\n\n"
-                + json.dumps(results, ensure_ascii=False)
-            ), None
-        return json.dumps(results, ensure_ascii=False), None
+            result_text = "【注意：知识库中暂无与该主题高度相关的内容，以下为最近似的结果，相关性可能较低】\n\n" + result_text
+
+        return result_text, None, citations
 
     if name == "get_video_note":
         v = get_video(args.get("video_id", ""))
         if not v:
-            return "未找到该视频", None
-        return f"**{v['title']}**\n\n{v.get('insights', '暂无笔记')}", None
+            return "未找到该视频", None, None
+        return f"**{v['title']}**\n\n{v.get('insights', '暂无笔记')}", None, None
 
     if name == "list_videos_in_kb":
         category = args.get("category")
         videos = list_videos()
         if category:
             videos = [v for v in videos if v.get("category") == category]
-        if not videos:
-            return "知识库中没有视频" if not category else f"分类「{category}」下暂无视频", None
-        lines = [
-            f"- ID:{v['id']} 《{v['title']}》 分类:{v.get('category','未知')} 标签:{','.join((v.get('tags') or [])[:3])}"
-            for v in videos
-        ]
-        return "\n".join(lines), None
+
+        from storage.notes_db import list_notes as _list_notes
+        notes = _list_notes()
+        if category:
+            notes = [n for n in notes if n.get("category") == category]
+
+        if not videos and not notes:
+            msg = "知识库中没有任何内容" if not category else f"分类「{category}」下暂无内容"
+            return msg, None, None
+
+        parts: list[str] = []
+        if videos:
+            video_lines = [
+                f"- [视频] ID:{v['id']} 《{v['title']}》 分类:{v.get('category','未知')} "
+                f"导入时间:{v.get('created_at','')[:10]} 标签:{','.join((v.get('tags') or [])[:3])}"
+                for v in videos
+            ]
+            parts.append("【视频】\n" + "\n".join(video_lines))
+        if notes:
+            note_lines = [
+                f"- [笔记] ID:{n['id']} 《{n['title']}》 分类:{n.get('category','未知')} "
+                f"导入时间:{n.get('created_at','')[:10]} 格式:{n.get('file_type','').upper()} 字数:{n.get('word_count',0)}"
+                for n in notes
+            ]
+            parts.append("【导入笔记】\n" + "\n".join(note_lines))
+
+        return "\n\n".join(parts), None, None
 
     if name == "summarize_category":
         from processors.article import summarize_category_impl
         result = await loop.run_in_executor(None, summarize_category_impl, args.get("category", ""))
-        return result, None
+        return result, None, None
 
     if name == "compare_videos":
         from processors.article import compare_videos_impl
@@ -421,27 +564,27 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
             None, compare_videos_impl,
             args.get("video_ids", []), args.get("topic", ""),
         )
-        return result, None
+        return result, None, None
 
     if name == "search_youtube_videos":
         from extractors.youtube_search import search_youtube
         videos = await loop.run_in_executor(None, search_youtube, args.get("query", ""), 5)
         if not videos:
-            return "未找到相关视频", None
+            return "未找到相关视频", None, None
         lines = [f"- {v['title']} | {v['url']} | 频道:{v['channel']}" for v in videos]
-        return "\n".join(lines), videos
+        return "\n".join(lines), videos, None
 
     if name == "generate_synthesis_article":
         from processors.article import generate_article
         result = await loop.run_in_executor(None, generate_article, args.get("topic", ""))
         if result.get("error"):
-            return result["error"], None
+            return result["error"], None, None
         return (
             f"文章已生成并保存到 Obsidian（{result.get('source_count', 0)} 个来源）。\n\n"
             f"文章预览：\n\n{result.get('article', '')[:600]}…"
-        ), None
+        ), None, None
 
-    return "未知工具", None
+    return "未知工具", None, None
 
 
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
@@ -451,12 +594,17 @@ async def chat_stream(req: ChatRequest):
     async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
     async def generate() -> AsyncGenerator[str, None]:
+        from processors.long_memory import get_memory_context, update_memory_from_conversation
+        memory_ctx = get_memory_context()
+        system_content = _CHAT_SYSTEM + ("\n\n" + memory_ctx if memory_ctx else "")
+
         messages: list[dict] = [
-            {"role": "system", "content": _CHAT_SYSTEM},
+            {"role": "system", "content": system_content},
             *req.as_dicts(),
         ]
         messages = await _compress_history(messages, async_client)
         loop = asyncio.get_event_loop()
+        turn_citations: list[dict] = []  # accumulates across all tool calls this turn
 
         for _ in range(8):
             tool_calls_acc: dict[int, dict] = {}
@@ -504,7 +652,19 @@ async def chat_stream(req: ChatRequest):
                 label = _TOOL_LABELS.get(tool_name, tool_name)
                 yield f"data: {json.dumps({'type': 'tool_use', 'tool': tool_name, 'label': label}, ensure_ascii=False)}\n\n"
 
-                result_str, suggestions = await _execute_tool(tool_name, tc["function"]["arguments"], loop)
+                result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop)
+
+                if citations:
+                    # Renumber citations globally across multiple tool calls this turn
+                    renumbered = []
+                    seen_urls: set[str] = set(c["url"] for c in turn_citations)
+                    for c in citations:
+                        if c["url"] not in seen_urls:
+                            seen_urls.add(c["url"])
+                            renumbered.append({**c, "index": len(turn_citations) + len(renumbered) + 1})
+                    if renumbered:
+                        turn_citations.extend(renumbered)
+                        yield f"data: {json.dumps({'type': 'citations', 'sources': renumbered}, ensure_ascii=False)}\n\n"
 
                 if suggestions:
                     yield f"data: {json.dumps({'type': 'suggestions', 'videos': suggestions}, ensure_ascii=False)}\n\n"
@@ -512,6 +672,8 @@ async def chat_stream(req: ChatRequest):
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_str})
 
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        # Fire-and-forget: update long-term memory in background
+        loop.run_in_executor(None, update_memory_from_conversation, req.as_dicts())
 
     return StreamingResponse(
         generate(),
@@ -713,7 +875,7 @@ async def remove_video(video_id: str):
 async def process_video(req: ProcessRequest, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
     task_queues[task_id] = asyncio.Queue()
-    background_tasks.add_task(_process_video, task_id, req.url, req.platform)
+    background_tasks.add_task(_process_video, task_id, req.url, req.platform, req.translate, req.diarize)
     return {"task_id": task_id}
 
 
@@ -738,6 +900,161 @@ async def stream_status(task_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Active Recall endpoints ───────────────────────────────────────────────────
+
+class RecallGenerateRequest(BaseModel):
+    video_id: str
+    count: int = 5
+
+
+class RecallReviewRequest(BaseModel):
+    quality: int  # 1-5
+
+
+@app.post("/api/recall/generate")
+async def recall_generate(req: RecallGenerateRequest):
+    loop = asyncio.get_event_loop()
+    from processors.recall import generate_cards_for_video
+    cards = await loop.run_in_executor(None, generate_cards_for_video, req.video_id, req.count)
+    return {"cards": cards}
+
+
+@app.get("/api/recall/due")
+async def recall_due():
+    from storage.recall_db import get_due_cards, get_stats
+    return {"cards": get_due_cards(), "stats": get_stats()}
+
+
+@app.get("/api/recall/all")
+async def recall_all():
+    from storage.recall_db import list_cards, get_stats
+    return {"cards": list_cards(), "stats": get_stats()}
+
+
+@app.post("/api/recall/review/{card_id}")
+async def recall_review(card_id: str, req: RecallReviewRequest):
+    loop = asyncio.get_event_loop()
+    from processors.recall import review_card
+    updated = await loop.run_in_executor(None, review_card, card_id, req.quality)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return updated
+
+
+@app.delete("/api/recall/video/{video_id}")
+async def recall_delete_by_video(video_id: str):
+    from storage.recall_db import delete_by_video
+    deleted = delete_by_video(video_id)
+    return {"deleted": deleted}
+
+
+# ── Knowledge Graph endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/graph")
+async def get_graph():
+    loop = asyncio.get_event_loop()
+    from processors.knowledge_graph import build_graph
+    return await loop.run_in_executor(None, build_graph, False)
+
+
+@app.post("/api/graph/rebuild")
+async def rebuild_graph():
+    loop = asyncio.get_event_loop()
+    from processors.knowledge_graph import build_graph
+    return await loop.run_in_executor(None, build_graph, True)
+
+
+# ── Long-term Memory endpoints ────────────────────────────────────────────────
+
+class MemoryUpdateRequest(BaseModel):
+    interests: list[str] = []
+    learning_goals: list[str] = []
+    gaps: list[str] = []
+    key_insights: list[str] = []
+    summary: str = ""
+
+
+@app.get("/api/memory")
+async def get_memory():
+    from storage.memory_store import load
+    return load()
+
+
+@app.put("/api/memory")
+async def update_memory(req: MemoryUpdateRequest):
+    from storage.memory_store import load, save
+    from datetime import datetime
+    mem = load()
+    mem.update({
+        "interests": req.interests,
+        "learning_goals": req.learning_goals,
+        "gaps": req.gaps,
+        "key_insights": req.key_insights,
+        "summary": req.summary,
+        "updated_at": datetime.now().isoformat(),
+    })
+    save(mem)
+    return mem
+
+
+@app.delete("/api/memory/reset")
+async def reset_memory():
+    from storage.memory_store import reset
+    return reset()
+
+
+# ── Note import endpoints ─────────────────────────────────────────────────────
+
+@app.post("/api/notes/import")
+async def import_notes(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+):
+    tasks = []
+    for f in files:
+        ext = Path(f.filename or "file.txt").suffix.lower()
+        if ext not in (".md", ".txt", ".pdf", ".docx", ".doc"):
+            continue
+        content = await f.read()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        tmp.write(content)
+        tmp.close()
+        task_id = str(uuid.uuid4())
+        task_queues[task_id] = asyncio.Queue()
+        background_tasks.add_task(_process_note_file, task_id, Path(tmp.name), f.filename or "untitled")
+        tasks.append({"task_id": task_id, "filename": f.filename})
+    if not tasks:
+        raise HTTPException(status_code=400, detail="没有可处理的文件（支持 .md .txt .pdf .docx）")
+    return {"tasks": tasks}
+
+
+@app.get("/api/notes")
+async def get_notes():
+    from storage.notes_db import list_notes
+    notes = list_notes()
+    return [{k: v for k, v in n.items() if k != "content"} for n in notes]
+
+
+@app.get("/api/notes/{note_id}")
+async def get_note_content(note_id: str):
+    from storage.notes_db import get_note
+    note = get_note(note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return note
+
+
+@app.delete("/api/notes/{note_id}")
+async def delete_note(note_id: str):
+    from storage.notes_db import get_note, delete_note as _delete_note
+    note = get_note(note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    delete_document(note["url"])
+    deleted = _delete_note(note_id)
+    return {"deleted": deleted}
 
 
 if __name__ == "__main__":
