@@ -7,18 +7,30 @@ import type { ChatMessage, CitationSource, Video, YoutubeVideoSuggestion } from 
 let _idCounter = 0
 const nextId = () => String(++_idCounter)
 
+const STORAGE_KEY = 'chat_messages'
+const WELCOME: ChatMessage = {
+  id: '0',
+  role: 'assistant',
+  content: '你好！我是你的知识库助手，支持多种工具来帮你探索知识库。你可以问我：\n\n- 最近学了哪些视频？\n- 对比几个视频的核心观点\n- 某分类下有哪些内容？\n- 帮我生成一篇关于「XX主题」的综合文章',
+}
+
+function loadMessages(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as ChatMessage[]
+      if (parsed.length > 0) return parsed
+    }
+  } catch { /* ignore */ }
+  return [WELCOME]
+}
+
 interface Props {
   suggestedVideo?: Video | null
 }
 
 export default function ChatInterface({ suggestedVideo }: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: nextId(),
-      role: 'assistant',
-      content: '你好！我是你的知识库助手，支持多种工具来帮你探索知识库。你可以问我：\n\n- 最近学了哪些视频？\n- 对比几个视频的核心观点\n- 某分类下有哪些内容？\n- 帮我生成一篇关于「XX主题」的综合文章',
-    },
-  ])
+  const [messages, setMessages] = useState<ChatMessage[]>(loadMessages)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [toolActivity, setToolActivity] = useState('')
@@ -28,6 +40,10 @@ export default function ChatInterface({ suggestedVideo }: Props) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, toolActivity])
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages)) } catch { /* ignore */ }
+  }, [messages])
 
   useEffect(() => {
     if (suggestedVideo) {
@@ -107,6 +123,15 @@ export default function ChatInterface({ suggestedVideo }: Props) {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Header with clear button */}
+      <div className="flex justify-end pb-2 shrink-0">
+        <button
+          onClick={() => { setMessages([WELCOME]); localStorage.removeItem(STORAGE_KEY) }}
+          className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
+        >
+          清除对话
+        </button>
+      </div>
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-1 py-2 space-y-4 min-h-0">
         {messages.map((msg) => (

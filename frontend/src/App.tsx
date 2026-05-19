@@ -97,6 +97,10 @@ export default function App() {
 
         {/* Content */}
         <div className="flex-1 overflow-hidden p-6 min-h-0">
+          {/* Chat is always mounted to preserve conversation history */}
+          <div className={`h-full flex flex-col ${activeTab === 'chat' ? '' : 'hidden'}`}>
+            <ChatInterface suggestedVideo={selectedVideo} />
+          </div>
           {activeTab === 'add' && (
             <div className="max-w-2xl space-y-5 overflow-y-auto h-full pb-4">
               <VideoInput
@@ -108,11 +112,6 @@ export default function App() {
                 hasVideos={videos.length > 0}
                 onAddVideo={(url) => setPrefillUrl(url)}
               />
-            </div>
-          )}
-          {activeTab === 'chat' && (
-            <div className="h-full flex flex-col">
-              <ChatInterface suggestedVideo={selectedVideo} />
             </div>
           )}
           {activeTab === 'note' && selectedVideo && (
