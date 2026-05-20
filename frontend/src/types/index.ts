@@ -49,6 +49,11 @@ export interface CitationSource {
   channel: string
 }
 
+export interface ToolCallRecord {
+  label: string
+  queryRewrite?: { original: string; rewritten: string }
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -56,6 +61,7 @@ export interface ChatMessage {
   toolActivity?: string
   suggestions?: YoutubeVideoSuggestion[]
   citations?: CitationSource[]
+  toolCallRecords?: ToolCallRecord[]
 }
 
 export interface Stats {
@@ -89,7 +95,7 @@ export interface Review {
   content: string
 }
 
-export type ActiveTab = 'add' | 'import' | 'chat' | 'note' | 'stats' | 'review' | 'article' | 'recall' | 'graph' | 'agent'
+export type ActiveTab = 'add' | 'import' | 'ai' | 'note' | 'stats' | 'review' | 'article' | 'recall' | 'graph'
 
 // ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
 
@@ -98,12 +104,13 @@ export interface AgentStep {
   task: string
   status: 'pending' | 'running' | 'done' | 'error'
   summary?: string
+  stop_reason?: string
 }
 
 export type AgentEvent =
   | { type: 'plan'; steps: AgentStep[] }
   | { type: 'agent_start'; agent: string; task: string }
-  | { type: 'agent_done'; agent: string; summary: string }
+  | { type: 'agent_done'; agent: string; summary: string; stop_reason?: string }
   | { type: 'text'; content: string }
   | { type: 'skills'; skills: { name: string; description: string }[] }
   | { type: 'harness'; budget: BudgetSummary }

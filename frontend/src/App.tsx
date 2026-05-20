@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import VideoInput from './components/VideoInput'
 import VideoLibrary from './components/VideoLibrary'
-import ChatInterface from './components/ChatInterface'
+import AiPanel from './components/AiPanel'
 import NoteEditor from './components/NoteEditor'
 import StatsPanel from './components/StatsPanel'
 import ReviewPanel from './components/ReviewPanel'
@@ -11,7 +11,6 @@ import RecallPanel from './components/RecallPanel'
 import GraphPanel from './components/GraphPanel'
 import MemorySidebar from './components/MemorySidebar'
 import NoteImportPanel from './components/NoteImportPanel'
-import AgentPanel from './components/AgentPanel'
 import { fetchVideos, fetchImportedNotes } from './api/client'
 import type { ActiveTab, ImportedNote, Video } from './types'
 
@@ -42,9 +41,8 @@ export default function App() {
   const TABS: { id: ActiveTab; label: string; disabled?: boolean }[] = [
     { id: 'add', label: '添加视频' },
     { id: 'import', label: '导入笔记' },
-    { id: 'chat', label: '知识对话' },
+    { id: 'ai', label: 'AI 对话' },
     { id: 'note', label: '笔记', disabled: !selectedVideo },
-    { id: 'agent', label: '深度分析' },
     { id: 'article', label: '综合文章' },
     { id: 'recall', label: '主动回忆' },
     { id: 'graph', label: '知识图谱' },
@@ -99,9 +97,9 @@ export default function App() {
 
         {/* Content */}
         <div className="flex-1 overflow-hidden p-6 min-h-0">
-          {/* Chat is always mounted to preserve conversation history */}
-          <div className={`h-full flex flex-col ${activeTab === 'chat' ? '' : 'hidden'}`}>
-            <ChatInterface suggestedVideo={selectedVideo} />
+          {/* AiPanel always mounted to preserve chat history */}
+          <div className={`h-full flex flex-col min-h-0 ${activeTab === 'ai' ? '' : 'hidden'}`}>
+            <AiPanel suggestedVideo={selectedVideo} />
           </div>
           {activeTab === 'add' && (
             <div className="max-w-2xl space-y-5 overflow-y-auto h-full pb-4">
@@ -125,11 +123,6 @@ export default function App() {
             />
           )}
           {activeTab === 'stats' && <StatsPanel />}
-          {activeTab === 'agent' && (
-            <div className="h-full overflow-y-auto">
-              <AgentPanel />
-            </div>
-          )}
           {activeTab === 'article' && <ArticlePanel />}
           {activeTab === 'review' && <ReviewPanel />}
           {activeTab === 'recall' && <RecallPanel videos={videos} />}

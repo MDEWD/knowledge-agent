@@ -150,6 +150,7 @@ export async function* streamReviewChat(
 type ChatEvent =
   | { type: 'text'; content: string }
   | { type: 'tool_use'; tool: string; label: string }
+  | { type: 'query_rewrite'; original: string; rewritten: string }
   | { type: 'suggestions'; videos: YoutubeVideoSuggestion[] }
   | { type: 'citations'; sources: CitationSource[] }
   | { type: 'reflection'; gap: string }

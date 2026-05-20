@@ -4,6 +4,7 @@ OrchestratorAgent: Plans, dispatches to sub-agents in parallel, then synthesizes
 Flow:
   1. plan(task) → decompose into subtasks for ResearchAgent + AnalysisAgent
   2. asyncio.gather → run both sub-agents concurrently
+     Each sub-agent uses CompletionEvaluator to decide when it has enough.
   3. WritingAgent → synthesize results into final streaming report
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import AsyncGenerator
 from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
+from agents.completion_evaluator import CompletionEvaluator
 from agents.research_agent import ResearchAgent
 from agents.analysis_agent import AnalysisAgent
 from agents.writing_agent import WritingAgent
@@ -35,18 +37,28 @@ _PLANNER_PROMPT = """\
 class OrchestratorAgent:
     """
     Parallel orchestrator: Research + Analysis run concurrently,
-    then WritingAgent synthesizes the combined results.
+    each with an independent CompletionEvaluator, then WritingAgent
+    synthesizes the combined results.
     """
 
     def __init__(self, client: AsyncOpenAI, model: str):
         self.client = client
         self.model = model
-        self.research = ResearchAgent(client, model)
-        self.analysis = AnalysisAgent(client, model)
+
+        # One shared evaluator instance per sub-agent type is fine — they
+        # are stateless and use only the EvalContext passed at call time.
+        evaluator = CompletionEvaluator(
+            client,
+            model,
+            confidence_threshold=0.7,
+            skip_first_steps=1,
+        )
+
+        self.research = ResearchAgent(client, model, evaluator=evaluator)
+        self.analysis = AnalysisAgent(client, model, evaluator=evaluator)
         self.writer = WritingAgent(client, model)
 
     async def _plan(self, task: str) -> dict:
-        """Decompose task into subtasks for each sub-agent."""
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -67,7 +79,8 @@ class OrchestratorAgent:
     async def run_stream(self, task: str) -> AsyncGenerator[dict, None]:
         """
         Stream orchestration events:
-          plan → agent_start (×2) → agent_done (×2) → agent_start (writing) → text chunks → done
+          plan → agent_start (×2) → agent_done (×2, with stop_reason)
+               → agent_start (writing) → text chunks → done
         """
         # ── Phase 1: Plan ──────────────────────────────────────────────────────
         plan = await self._plan(task)
@@ -87,15 +100,24 @@ class OrchestratorAgent:
         yield {"type": "agent_start", "agent": "ResearchAgent", "task": research_task}
         yield {"type": "agent_start", "agent": "AnalysisAgent", "task": analysis_task}
 
-        research_result, analysis_result = await asyncio.gather(
-            self.research.run(research_task),
-            self.analysis.run(analysis_task),
-        )
+        (research_result, research_decision), (analysis_result, analysis_decision) = \
+            await asyncio.gather(
+                self.research.run(research_task),
+                self.analysis.run(analysis_task),
+            )
 
-        yield {"type": "agent_done", "agent": "ResearchAgent",
-               "summary": research_result[:300] + ("…" if len(research_result) > 300 else "")}
-        yield {"type": "agent_done", "agent": "AnalysisAgent",
-               "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else "")}
+        yield {
+            "type": "agent_done",
+            "agent": "ResearchAgent",
+            "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
+            "stop_reason": research_decision.reason if research_decision else "自然结束",
+        }
+        yield {
+            "type": "agent_done",
+            "agent": "AnalysisAgent",
+            "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
+            "stop_reason": analysis_decision.reason if analysis_decision else "自然结束",
+        }
 
         # ── Phase 3: Writing (streaming) ───────────────────────────────────────
         writing_task = (
@@ -107,7 +129,6 @@ class OrchestratorAgent:
 
         yield {"type": "agent_start", "agent": "WritingAgent", "task": "综合研究与分析结果，撰写报告"}
 
-        # Stream the writing output
         messages = [
             {"role": "system", "content": self.writer.system_prompt},
             {"role": "user", "content": writing_task},
@@ -125,6 +146,10 @@ class OrchestratorAgent:
                 full_text += delta
                 yield {"type": "text", "content": delta}
 
-        yield {"type": "agent_done", "agent": "WritingAgent",
-               "summary": full_text[:300] + ("…" if len(full_text) > 300 else "")}
+        yield {
+            "type": "agent_done",
+            "agent": "WritingAgent",
+            "summary": full_text[:300] + ("…" if len(full_text) > 300 else ""),
+            "stop_reason": "报告撰写完成",
+        }
         yield {"type": "done"}

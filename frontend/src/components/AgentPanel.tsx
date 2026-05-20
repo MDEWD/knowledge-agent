@@ -60,7 +60,7 @@ export default function AgentPanel() {
           setSteps((prev) =>
             prev.map((s) =>
               s.agent === event.agent
-                ? { ...s, status: 'done', summary: event.summary }
+                ? { ...s, status: 'done', summary: event.summary, stop_reason: event.stop_reason }
                 : s,
             ),
           )
@@ -206,6 +206,11 @@ export default function AgentPanel() {
                   {step.status === 'done' && step.summary && (
                     <p className="text-xs opacity-60 mt-1.5 line-clamp-2 border-t border-current/20 pt-1.5">
                       {step.summary}
+                    </p>
+                  )}
+                  {step.status === 'done' && step.stop_reason && (
+                    <p className="text-[10px] opacity-40 mt-1 italic">
+                      停止原因：{step.stop_reason}
                     </p>
                   )}
                 </div>
