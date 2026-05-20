@@ -15,7 +15,12 @@ The loop terminates when ANY of these is true (checked in order):
   3. MAX_STEPS hard limit is reached.  Safety net only — should rarely
      fire if the evaluator is working correctly.
 
-Each subclass defines its own system_prompt, tools, and tool executor.
+LLM resilience
+--------------
+Every LLM call is wrapped with async_retry so transient API errors (rate
+limits, 5xx, network timeouts) are retried with exponential back-off.  An
+optional CircuitBreaker can be shared across agents to fast-fail when the
+upstream is known to be down.
 """
 from __future__ import annotations
 
@@ -31,10 +36,11 @@ from agents.completion_evaluator import (
     StopDecision,
     ToolCallSummary,
 )
+from harness.retry import CircuitBreaker, RetryPolicy, async_retry
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 8          # absolute ceiling — evaluator should stop us first
+MAX_STEPS = 8
 _FORCE_ANSWER_PROMPT = (
     "根据以上已收集的信息，请直接给出最终答案。不要再调用工具。"
 )
@@ -52,11 +58,26 @@ class BaseAgent:
         model: str,
         *,
         evaluator: CompletionEvaluator | None = None,
+        policy: RetryPolicy | None = None,
+        circuit: CircuitBreaker | None = None,
     ):
         self.client = client
         self.model = model
-        # Evaluator is optional — agents without it fall back to MAX_STEPS
         self.evaluator = evaluator
+        self._policy = policy or RetryPolicy(max_attempts=3, base_delay=1.0)
+        self._circuit = circuit
+
+    async def _llm(self, **kwargs):
+        """Wrapper that retries the LLM call according to the agent's policy."""
+        async def _call():
+            return await self.client.chat.completions.create(**kwargs)
+
+        return await async_retry(
+            _call,
+            policy=self._policy,
+            circuit=self._circuit,
+            label=f"{self.name}/llm",
+        )
 
     async def _execute_tool(self, tool_name: str, arguments: str) -> str:
         """Override in subclasses to implement tool logic."""
@@ -65,7 +86,6 @@ class BaseAgent:
     async def _request_final_answer(
         self, messages: list[dict], stop_decision: StopDecision | None = None
     ) -> str:
-        """Ask the LLM to wrap up based on what it has collected so far."""
         hint = ""
         if stop_decision:
             hint = f"（判断依据：{stop_decision.reason}）"
@@ -73,7 +93,7 @@ class BaseAgent:
             "role": "user",
             "content": _FORCE_ANSWER_PROMPT + hint,
         })
-        resp = await self.client.chat.completions.create(
+        resp = await self._llm(
             model=self.model,
             messages=messages,
             temperature=0.3,
@@ -97,7 +117,7 @@ class BaseAgent:
         all_tool_calls: list[ToolCallSummary] = []
 
         for step in range(MAX_STEPS):
-            resp = await self.client.chat.completions.create(
+            resp = await self._llm(
                 model=self.model,
                 messages=messages,
                 tools=self.tools if self.tools else None,

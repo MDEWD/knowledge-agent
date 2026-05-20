@@ -1154,6 +1154,7 @@ async def delete_note(note_id: str):
 # Shared harness components (one per process)
 _harness_circuit = None
 _skill_store = None
+_checkpoint_store = None
 
 def _get_harness_circuit():
     global _harness_circuit
@@ -1169,9 +1170,17 @@ def _get_skill_store():
         _skill_store = SkillStore("data/skills")
     return _skill_store
 
+def _get_checkpoint_store():
+    global _checkpoint_store
+    if _checkpoint_store is None:
+        from harness.checkpoint import CheckpointStore
+        _checkpoint_store = CheckpointStore("data/checkpoints")
+    return _checkpoint_store
+
 
 class AgentRunRequest(BaseModel):
     task: str
+    run_id: str | None = None   # optional: supply to resume a previous run
 
 
 @app.post("/api/agent/run")
@@ -1196,7 +1205,12 @@ async def agent_run(req: AgentRunRequest):
             policy=RetryPolicy(max_attempts=2, base_delay=1.0),
         )
 
-        orch = OrchestratorAgent(async_client, DEEPSEEK_MODEL)
+        orch = OrchestratorAgent(
+            async_client, DEEPSEEK_MODEL,
+            checkpoint_store=_get_checkpoint_store(),
+            policy=RetryPolicy(max_attempts=3, base_delay=1.0),
+            circuit=_get_harness_circuit(),
+        )
         trace = tracer.trace("orchestrator", metadata={"task": req.task[:200]})
         transcript_parts: list[str] = []
         final_output = ""
@@ -1205,7 +1219,7 @@ async def agent_run(req: AgentRunRequest):
             # Pre-check input via guardrails
             harness.guardrails.pre_check(req.task)
 
-            async for event in orch.run_stream(req.task):
+            async for event in orch.run_stream(req.task, run_id=req.run_id):
                 # Track transcript for skill extraction
                 if event.get("type") == "text":
                     transcript_parts.append(event.get("content", ""))
