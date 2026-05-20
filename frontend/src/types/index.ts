@@ -118,7 +118,8 @@ export type AgentEvent =
   | { type: 'error'; message: string }
   | { type: 'done' }
   | { type: 'hitl_confirm'; run_id: string; steps: AgentStep[] }
-  | { type: 'sub_agent_tool'; agent: string; tool: string; label: string }
+  | { type: 'sub_agent_tool'; agent: string; tool: string; label: string; args?: string }
+  | { type: 'collaboration'; from_agent: string; to_agent: string; topic: string; reason: string }
 
 // ── RAG Eval ──────────────────────────────────────────────────────────────────
 

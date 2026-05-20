@@ -16,10 +16,16 @@ const COLOR_CLASSES: Record<string, string> = {
   green:  'bg-green-900/30 border-green-700 text-green-300',
 }
 
-// HITL confirmation state
 interface HitlState {
   runId: string
   steps: AgentStep[]
+}
+
+interface CollabEvent {
+  from_agent: string
+  to_agent: string
+  topic: string
+  reason: string
 }
 
 export default function AgentPanel() {
@@ -38,6 +44,8 @@ export default function AgentPanel() {
   const [confirming, setConfirming]        = useState(false)
   // Sub-agent live tool calls: agentName → label[]
   const [agentTools, setAgentTools]        = useState<Record<string, string[]>>({})
+  // Inter-agent collaboration events
+  const [collabEvents, setCollabEvents]    = useState<CollabEvent[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -56,6 +64,7 @@ export default function AgentPanel() {
     setLearnedSkills([])
     setHitl(null)
     setAgentTools({})
+    setCollabEvents([])
 
     try {
       for await (const event of streamAgentRun(t)) {
@@ -64,10 +73,9 @@ export default function AgentPanel() {
         } else if (event.type === 'plan') {
           setSteps(event.steps)
         } else if (event.type === 'hitl_confirm') {
-          // Show HITL confirmation card; the SSE loop stays alive waiting
           setHitl({ runId: event.run_id, steps: event.steps })
         } else if (event.type === 'agent_start') {
-          setHitl(null)   // dismiss confirmation card once execution begins
+          setHitl(null)
           setSteps((prev) =>
             prev.map((s) =>
               s.agent === event.agent ? { ...s, status: 'running' } : s,
@@ -78,6 +86,13 @@ export default function AgentPanel() {
             ...prev,
             [event.agent]: [...(prev[event.agent] ?? []), event.label],
           }))
+        } else if (event.type === 'collaboration') {
+          setCollabEvents((prev) => [...prev, {
+            from_agent: event.from_agent,
+            to_agent: event.to_agent,
+            topic: event.topic,
+            reason: event.reason,
+          }])
         } else if (event.type === 'agent_done') {
           setSteps((prev) =>
             prev.map((s) =>
@@ -134,7 +149,7 @@ export default function AgentPanel() {
         <div>
           <h2 className="text-lg font-semibold text-white mb-1">深度分析</h2>
           <p className="text-sm text-gray-400">
-            多 Agent 并行协作 · HITL 确认 · Voyager 技能库
+            Research → Analysis → Writing · Agent 间协作 · HITL 确认
           </p>
         </div>
         <button
@@ -270,51 +285,85 @@ export default function AgentPanel() {
               const meta = AGENT_META[step.agent] ?? { icon: '🤖', color: 'blue', desc: step.agent }
               const colorCls = COLOR_CLASSES[meta.color] ?? COLOR_CLASSES.blue
               const toolCalls = agentTools[step.agent] ?? []
+
+              // Inject collaboration cards before the AnalysisAgent step
+              const collabBefore = step.agent === 'AnalysisAgent' && collabEvents.length > 0
+                ? collabEvents
+                : []
+
               return (
-                <div key={i} className={`rounded-xl border px-4 py-3 ${colorCls} transition-all`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-base">{meta.icon}</span>
-                    <span className="text-xs font-semibold">{step.agent}</span>
-                    <span className="text-xs opacity-60">— {meta.desc}</span>
-                    <div className="ml-auto shrink-0">
-                      {step.status === 'pending' && <span className="text-xs opacity-40">等待中</span>}
-                      {step.status === 'running' && (
-                        <span className="flex items-center gap-1 text-xs">
-                          <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
-                          执行中
-                        </span>
-                      )}
-                      {step.status === 'done' && <span className="text-xs">✓ 完成</span>}
+                <div key={i} className="flex flex-col gap-2">
+                  {/* Collaboration connector cards injected before AnalysisAgent */}
+                  {collabBefore.map((ev, ci) => (
+                    <div key={`collab-${ci}`} className="relative">
+                      <div className="absolute left-4 -top-2 bottom-0 w-px bg-cyan-800/50" />
+                      <div className="ml-8 bg-cyan-900/20 border border-cyan-800/60 rounded-xl px-4 py-2.5">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs">🔄</span>
+                          <span className="text-[11px] font-semibold text-cyan-300">Agent 间协作请求</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[11px] text-cyan-200/70">
+                          <span className="font-medium">{ev.from_agent}</span>
+                          <span className="opacity-50">→</span>
+                          <span className="font-medium">{ev.to_agent}</span>
+                          <span className="opacity-50 mx-1">·</span>
+                          <span>补充检索「{ev.topic}」</span>
+                        </div>
+                        {ev.reason && (
+                          <p className="text-[10px] text-cyan-300/40 mt-0.5 leading-relaxed">
+                            原因：{ev.reason}
+                          </p>
+                        )}
+                      </div>
                     </div>
+                  ))}
+
+                  {/* Agent execution card */}
+                  <div className={`rounded-xl border px-4 py-3 ${colorCls} transition-all`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-base">{meta.icon}</span>
+                      <span className="text-xs font-semibold">{step.agent}</span>
+                      <span className="text-xs opacity-60">— {meta.desc}</span>
+                      <div className="ml-auto shrink-0">
+                        {step.status === 'pending' && <span className="text-xs opacity-40">等待中</span>}
+                        {step.status === 'running' && (
+                          <span className="flex items-center gap-1 text-xs">
+                            <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
+                            执行中
+                          </span>
+                        )}
+                        {step.status === 'done' && <span className="text-xs">✓ 完成</span>}
+                      </div>
+                    </div>
+
+                    <p className="text-xs opacity-70 truncate">{step.task}</p>
+
+                    {/* Live tool call chips */}
+                    {toolCalls.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {toolCalls.map((label, j) => (
+                          <span
+                            key={j}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-current/10 border border-current/20 opacity-80"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70" />
+                            {label}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {step.status === 'done' && step.summary && (
+                      <p className="text-xs opacity-60 mt-1.5 line-clamp-2 border-t border-current/20 pt-1.5">
+                        {step.summary}
+                      </p>
+                    )}
+                    {step.status === 'done' && step.stop_reason && (
+                      <p className="text-[10px] opacity-40 mt-1 italic">
+                        停止原因：{step.stop_reason}
+                      </p>
+                    )}
                   </div>
-
-                  <p className="text-xs opacity-70 truncate">{step.task}</p>
-
-                  {/* Live tool call chips */}
-                  {toolCalls.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-2">
-                      {toolCalls.map((label, j) => (
-                        <span
-                          key={j}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-current/10 border border-current/20 opacity-80"
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70" />
-                          {label}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {step.status === 'done' && step.summary && (
-                    <p className="text-xs opacity-60 mt-1.5 line-clamp-2 border-t border-current/20 pt-1.5">
-                      {step.summary}
-                    </p>
-                  )}
-                  {step.status === 'done' && step.stop_reason && (
-                    <p className="text-[10px] opacity-40 mt-1 italic">
-                      停止原因：{step.stop_reason}
-                    </p>
-                  )}
                 </div>
               )
             })}
@@ -365,7 +414,7 @@ export default function AgentPanel() {
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <p className="text-4xl mb-3">🤖</p>
-            <p className="text-sm text-gray-500">输入复杂任务，多个 Agent 并行协作完成深度分析</p>
+            <p className="text-sm text-gray-500">输入复杂任务，多个 Agent 顺序协作完成深度分析</p>
             <div className="flex justify-center gap-4 mt-4">
               {Object.entries(AGENT_META).map(([name, meta]) => (
                 <div key={name} className="flex items-center gap-1.5 text-xs text-gray-600">
@@ -374,6 +423,7 @@ export default function AgentPanel() {
                 </div>
               ))}
             </div>
+            <p className="text-xs text-gray-700 mt-3">分析过程中如发现知识缺口，Agent 间可互相请求补充研究</p>
           </div>
         </div>
       )}

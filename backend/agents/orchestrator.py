@@ -1,25 +1,39 @@
 """
-OrchestratorAgent: Plans, dispatches to sub-agents in parallel, then synthesizes.
+OrchestratorAgent: Plans, dispatches sub-agents sequentially with inter-agent
+collaboration via a shared Blackboard, then synthesises with WritingAgent.
 
-Flow:
-  1. plan(task) → decompose into subtasks for ResearchAgent + AnalysisAgent
+Flow
+----
+  1. plan(task) → decompose into research_task + analysis_task
   2. HITL gate (optional): yield hitl_confirm, wait for human approval
-  3. Queue-based parallel streaming → run both sub-agents concurrently,
-     forwarding their sub_agent_tool events in real time as they arrive.
-     Each sub-agent uses CompletionEvaluator to decide when it has enough.
-  4. WritingAgent → synthesize results into final streaming report
+  3. Phase 2a — ResearchAgent runs; result posted to Blackboard
+  4. Phase 2b — AnalysisAgent runs with Blackboard context injected.
+       If AnalysisAgent calls request_additional_research(topic, reason):
+         • a "collaboration" SSE event is emitted to the frontend
+         • the tool executes a targeted vector search and posts results back
+           to the Blackboard so the context stays current
+  5. WritingAgent → synthesises both results into a final streaming report
 
-Checkpoint resume
------------------
-If a CheckpointStore is supplied and a prior run exists for run_id:
-  - step=2 in the checkpoint → both sub-agents done; skip to WritingAgent.
+Collaboration protocol
+----------------------
+The Blackboard is the shared state bus:
+  - ResearchAgent posts its full result via blackboard.post_finding()
+  - AnalysisAgent reads blackboard.get_research_context() as a context prefix
+  - When AnalysisAgent calls request_additional_research, the Orchestrator
+    intercepts the sub_agent_tool event (tool == "request_additional_research"),
+    emits a {"type": "collaboration", ...} event to the frontend, and also
+    forwards the original event so the tool-chip still appears in the UI.
+    AnalysisAgent._execute_tool handles the actual search and Blackboard write.
+
+Checkpoint resume (three steps)
+---------------------------------
+  step=1 → ResearchAgent done; resume skips to AnalysisAgent with saved result
+  step=2 → Both sub-agents done; skip straight to WritingAgent
 
 HITL (Human-in-the-Loop)
 -------------------------
 When confirm_event is supplied, the orchestrator yields a hitl_confirm event
-after planning and then awaits the event (max 120 s).  The caller (app.py)
-stores the event keyed by run_id and sets it when the user confirms via
-POST /api/agent/confirm/{run_id}.
+after planning and then awaits the event (max 120 s).
 """
 from __future__ import annotations
 
@@ -31,6 +45,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
+from agents.blackboard import Blackboard
 from agents.completion_evaluator import CompletionEvaluator
 from agents.research_agent import ResearchAgent
 from agents.analysis_agent import AnalysisAgent
@@ -41,7 +56,7 @@ if TYPE_CHECKING:
     from harness.checkpoint import CheckpointStore
 
 _PLANNER_PROMPT = """\
-你是一个任务规划专家。根据用户的复杂任务，将其分解为两个并行子任务：
+你是一个任务规划专家。根据用户的复杂任务，将其分解为两个子任务：
 - research_task: 给 ResearchAgent 的检索任务（在知识库中搜索什么）
 - analysis_task: 给 AnalysisAgent 的分析任务（分析/对比什么角度）
 
@@ -55,9 +70,8 @@ _PLANNER_PROMPT = """\
 
 class OrchestratorAgent:
     """
-    Parallel orchestrator: Research + Analysis run concurrently,
-    each with an independent CompletionEvaluator, then WritingAgent
-    synthesizes the combined results.
+    Sequential collaborative orchestrator:
+      ResearchAgent → Blackboard → AnalysisAgent (with gap-fill) → WritingAgent
     """
 
     def __init__(
@@ -133,69 +147,6 @@ class OrchestratorAgent:
         return cp.metadata if cp else None
 
     # ------------------------------------------------------------------
-    # Queue-based parallel streaming
-    # ------------------------------------------------------------------
-
-    async def _stream_parallel(
-        self,
-        research_task: str,
-        analysis_task: str,
-        results_out: dict,
-    ) -> AsyncGenerator[dict, None]:
-        """
-        Run ResearchAgent and AnalysisAgent concurrently, yielding events in
-        arrival order.  Results are written to results_out when each agent
-        finishes (keyed by agent name).
-        """
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def _drain(agent, agent_task):
-            try:
-                async for event in agent.run_stream(agent_task):
-                    await queue.put(event)
-                    if event["type"] == "sub_agent_done":
-                        results_out[agent.name] = {
-                            "result": event["result"],
-                            "stop_reason": event.get("stop_reason"),
-                        }
-            except Exception as exc:
-                # Surface error without crashing the orchestrator
-                results_out[agent.name] = {
-                    "result": f"[{agent.name} 执行出错: {exc}]",
-                    "stop_reason": str(exc),
-                }
-                await queue.put({
-                    "type": "sub_agent_done",
-                    "agent": agent.name,
-                    "result": results_out[agent.name]["result"],
-                    "stop_reason": str(exc),
-                })
-            finally:
-                await queue.put({"type": "_sentinel"})
-
-        t1 = asyncio.create_task(_drain(self.research, research_task))
-        t2 = asyncio.create_task(_drain(self.analysis, analysis_task))
-
-        pending = 2
-        while pending > 0:
-            event = await queue.get()
-            if event["type"] == "_sentinel":
-                pending -= 1
-            elif event["type"] == "sub_agent_done":
-                # Convert to public agent_done event for the frontend
-                yield {
-                    "type": "agent_done",
-                    "agent": event["agent"],
-                    "summary": event["result"][:300] + ("…" if len(event["result"]) > 300 else ""),
-                    "stop_reason": event.get("stop_reason") or "自然结束",
-                }
-            else:
-                # Forward sub_agent_tool events (and any others) transparently
-                yield event
-
-        await asyncio.gather(t1, t2, return_exceptions=True)
-
-    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
@@ -209,8 +160,9 @@ class OrchestratorAgent:
         """
         Stream orchestration events:
           plan → [hitl_confirm → await confirmation] →
-          agent_start (×2) + sub_agent_tool events → agent_done (×2) →
-          agent_start (writing) → text chunks → done
+          agent_start(Research) → sub_agent_tool events → agent_done(Research) →
+          agent_start(Analysis) → sub_agent_tool/collaboration events → agent_done(Analysis) →
+          agent_start(Writing) → text chunks → agent_done(Writing) → done
         """
         run_id = run_id or str(uuid.uuid4())
 
@@ -246,37 +198,108 @@ class OrchestratorAgent:
                 }
                 return
 
-        # ── Phase 2: Parallel execution ────────────────────────────────────────
+        # ── Phase 2: Sequential collaborative execution ────────────────────────
+        blackboard = Blackboard()
+        research_result = ""
+        analysis_result = ""
+
         if resuming_from_step >= 2 and saved:
+            # Both agents done — restore and fast-forward to WritingAgent
             research_result = saved.get("research_result", "")
             analysis_result = saved.get("analysis_result", "")
 
-            yield {"type": "agent_done", "agent": "ResearchAgent",
-                   "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
-                   "stop_reason": saved.get("research_stop_reason", "已从断点恢复")}
-            yield {"type": "agent_done", "agent": "AnalysisAgent",
-                   "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
-                   "stop_reason": saved.get("analysis_stop_reason", "已从断点恢复")}
+            yield {
+                "type": "agent_done", "agent": "ResearchAgent",
+                "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
+                "stop_reason": saved.get("research_stop_reason", "已从断点恢复"),
+            }
+            yield {
+                "type": "agent_done", "agent": "AnalysisAgent",
+                "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
+                "stop_reason": saved.get("analysis_stop_reason", "已从断点恢复"),
+            }
+
         else:
+            # ── Phase 2a: ResearchAgent ────────────────────────────────────────
             yield {"type": "agent_start", "agent": "ResearchAgent", "task": research_task}
+
+            if resuming_from_step >= 1 and saved:
+                # Research done, resume from analysis
+                research_result = saved.get("research_result", "")
+                blackboard.post_finding("ResearchAgent", research_task, research_result)
+                yield {
+                    "type": "agent_done", "agent": "ResearchAgent",
+                    "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
+                    "stop_reason": saved.get("research_stop_reason", "已从断点恢复"),
+                }
+            else:
+                async for event in self.research.run_stream(research_task):
+                    if event["type"] == "sub_agent_done":
+                        research_result = event["result"]
+                        blackboard.post_finding("ResearchAgent", research_task, research_result)
+                        yield {
+                            "type": "agent_done", "agent": "ResearchAgent",
+                            "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
+                            "stop_reason": event.get("stop_reason") or "自然结束",
+                        }
+                    else:
+                        yield event
+
+                # Checkpoint after Research so a crash before Analysis can resume
+                self._save_checkpoint(run_id, task, step=1, metadata={
+                    "step": 1,
+                    "research_task": research_task,
+                    "analysis_task": analysis_task,
+                    "research_result": research_result,
+                    "research_stop_reason": "",
+                })
+
+            # ── Phase 2b: AnalysisAgent with Blackboard context ────────────────
+            self.analysis.blackboard = blackboard
+            analysis_context = blackboard.get_research_context()
+
             yield {"type": "agent_start", "agent": "AnalysisAgent", "task": analysis_task}
 
-            results: dict = {}
-            async for event in self._stream_parallel(research_task, analysis_task, results):
-                yield event
+            async for event in self.analysis.run_stream(analysis_task, context=analysis_context):
+                if event["type"] == "sub_agent_done":
+                    analysis_result = event["result"]
+                    yield {
+                        "type": "agent_done", "agent": "AnalysisAgent",
+                        "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
+                        "stop_reason": event.get("stop_reason") or "自然结束",
+                    }
 
-            research_result = results.get("ResearchAgent", {}).get("result", "")
-            analysis_result = results.get("AnalysisAgent", {}).get("result", "")
+                elif (event["type"] == "sub_agent_tool"
+                      and event.get("tool") == "request_additional_research"):
+                    # Emit collaboration event so the frontend shows the connector
+                    try:
+                        collab_args = json.loads(event.get("args", "{}"))
+                    except Exception:
+                        collab_args = {}
+                    yield {
+                        "type": "collaboration",
+                        "from_agent": "AnalysisAgent",
+                        "to_agent": "ResearchAgent",
+                        "topic": collab_args.get("topic", ""),
+                        "reason": collab_args.get("reason", ""),
+                    }
+                    # Also forward the raw event so the tool chip still renders
+                    yield event
 
+                else:
+                    yield event
+
+            # Checkpoint after both sub-agents complete
             self._save_checkpoint(run_id, task, step=2, metadata={
                 "step": 2,
                 "research_result": research_result,
-                "research_stop_reason": results.get("ResearchAgent", {}).get("stop_reason", ""),
+                "research_stop_reason": "",
                 "analysis_result": analysis_result,
-                "analysis_stop_reason": results.get("AnalysisAgent", {}).get("stop_reason", ""),
+                "analysis_stop_reason": "",
+                "blackboard": blackboard.to_dict(),
             })
 
-        # ── Phase 3: Writing (streaming) ───────────────────────────────────────
+        # ── Phase 3: WritingAgent (streaming synthesis) ────────────────────────
         writing_task = (
             f"原始任务：{task}\n\n"
             f"=== 研究员报告 ===\n{research_result}\n\n"

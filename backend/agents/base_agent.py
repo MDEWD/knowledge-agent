@@ -58,6 +58,7 @@ _TOOL_LABELS: dict[str, str] = {
     "get_video_note": "读取笔记",
     "compare_videos": "对比视频",
     "summarize_category": "汇总分类",
+    "request_additional_research": "请求补充研究",
 }
 
 
@@ -184,6 +185,7 @@ class BaseAgent:
                     "agent": self.name,
                     "tool": tc.function.name,
                     "label": label,
+                    "args": tc.function.arguments,
                 }
 
                 result = await self._execute_tool(tc.function.name, tc.function.arguments)
