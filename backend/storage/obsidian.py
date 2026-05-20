@@ -5,7 +5,7 @@ from config import OBSIDIAN_VAULT_PATH
 from processors.insights import parse_category
 
 
-def save_to_obsidian(insights: str, metadata: dict, transcript: str = "") -> Path:
+def save_to_obsidian(insights: str, metadata: dict, transcript: str = "", original_transcript: str = "") -> Path:
     category = parse_category(insights)
     category_dir = OBSIDIAN_VAULT_PATH / category
     category_dir.mkdir(parents=True, exist_ok=True)
@@ -16,6 +16,31 @@ def save_to_obsidian(insights: str, metadata: dict, transcript: str = "") -> Pat
     filename = f"{date_str} {safe_title}.md"
     filepath = category_dir / filename
 
+    filepath.write_text(_build_content(title, transcript, insights, date_str, metadata, category, original_transcript), encoding="utf-8")
+    return filepath
+
+
+def update_obsidian_note(obsidian_path: str, title: str, transcript: str, new_insights: str) -> None:
+    path = Path(obsidian_path)
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    insights_body = re.sub(r"##\s*分类\s*\n+[^\n#]+\n*", "", new_insights).strip()
+
+    sep = "\n\n---\n\n"
+    if sep in content:
+        # Replace everything after the last --- separator (end of transcript section)
+        pre = content[:content.rfind(sep) + len(sep)]
+        path.write_text(pre + insights_body, encoding="utf-8")
+    else:
+        # No transcript section — replace everything after # title heading
+        title_marker = f"# {title}\n\n"
+        idx = content.find(title_marker)
+        if idx != -1:
+            path.write_text(content[:idx + len(title_marker)] + insights_body, encoding="utf-8")
+
+
+def _build_content(title: str, transcript: str, insights: str, date_str: str, metadata: dict, category: str, original_transcript: str = "") -> str:
     frontmatter = (
         f"---\n"
         f"title: \"{title.replace(chr(34), chr(39))}\"\n"
@@ -29,12 +54,14 @@ def save_to_obsidian(insights: str, metadata: dict, transcript: str = "") -> Pat
     )
 
     transcript_section = ""
-    if transcript.strip():
+    if original_transcript.strip():
+        transcript_section = (
+            f"## 原始文案（英文）\n\n{original_transcript.strip()}\n\n"
+            f"## 中文翻译\n\n{transcript.strip()}\n\n---\n\n"
+        )
+    elif transcript.strip():
         transcript_section = f"## 原始文案\n\n{transcript.strip()}\n\n---\n\n"
 
-    # Remove the ## 分类 section from insights before writing (it's already in frontmatter)
     insights_body = re.sub(r"##\s*分类\s*\n+[^\n#]+\n*", "", insights).strip()
+    return frontmatter + f"# {title}\n\n" + transcript_section + insights_body
 
-    content = frontmatter + f"# {title}\n\n" + transcript_section + insights_body
-    filepath.write_text(content, encoding="utf-8")
-    return filepath

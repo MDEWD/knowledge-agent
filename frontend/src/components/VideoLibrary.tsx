@@ -1,17 +1,21 @@
 import { useState } from 'react'
 import { deleteVideo } from '../api/client'
-import type { Video } from '../types'
+import type { ImportedNote, Video } from '../types'
 
 interface Props {
   videos: Video[]
   onDelete: (id: string) => void
   onSelectVideo?: (video: Video) => void
+  notes?: ImportedNote[]
+  onSelectNote?: (note: ImportedNote) => void
 }
 
 const PLATFORM_ICON: Record<string, string> = {
   youtube: '▶',
   bilibili: '📺',
 }
+
+const CATEGORIES = ['财经理财', 'AI与科技', '心理学', '商业创业', '健康生活', '教育学习', '历史文化', '娱乐综艺', '科学探索', '其他']
 
 function formatDuration(seconds?: number): string {
   if (!seconds) return ''
@@ -21,22 +25,30 @@ function formatDuration(seconds?: number): string {
 }
 
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('zh-CN', {
-    month: 'short',
-    day: 'numeric',
-  })
+  return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 
-export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props) {
+export default function VideoLibrary({ videos, onDelete, onSelectVideo, notes = [], onSelectNote }: Props) {
   const [search, setSearch] = useState('')
+  const [activeCategory, setActiveCategory] = useState<string | null>(null)
+  const [sortDesc, setSortDesc] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  const filtered = videos.filter(
-    (v) =>
-      v.title.toLowerCase().includes(search.toLowerCase()) ||
-      v.channel.toLowerCase().includes(search.toLowerCase()) ||
-      v.tags.some((t) => t.toLowerCase().includes(search.toLowerCase())),
-  )
+  const presentCategories = CATEGORIES.filter((c) => videos.some((v) => v.category === c))
+
+  const filtered = videos
+    .filter((v) => {
+      const matchSearch =
+        v.title.toLowerCase().includes(search.toLowerCase()) ||
+        v.channel.toLowerCase().includes(search.toLowerCase()) ||
+        v.tags.some((t) => t.toLowerCase().includes(search.toLowerCase()))
+      const matchCategory = !activeCategory || v.category === activeCategory
+      return matchSearch && matchCategory
+    })
+    .sort((a, b) => {
+      const diff = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      return sortDesc ? -diff : diff
+    })
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -53,19 +65,55 @@ export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props)
   }
 
   return (
-    <div className="flex flex-col h-full gap-3">
-      <div>
-        <h2 className="text-sm font-semibold text-gray-300 mb-2">
-          知识库 <span className="text-gray-500 font-normal">({videos.length})</span>
+    <div className="flex flex-col h-full gap-2">
+      <div className="flex items-center justify-between shrink-0">
+        <h2 className="text-sm font-semibold text-gray-300">
+          知识库 <span className="text-gray-500 font-normal">({videos.length + notes.length})</span>
         </h2>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="搜索标题、频道、标签…"
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs
-            text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-        />
+        <button
+          onClick={() => setSortDesc((d) => !d)}
+          className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          title="切换排序"
+        >
+          {sortDesc ? '最新↑' : '最早↑'}
+        </button>
       </div>
+
+      <input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="搜索标题、频道、标签…"
+        className="shrink-0 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs
+          text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+      />
+
+      {presentCategories.length > 0 && (
+        <div className="shrink-0 flex flex-wrap gap-1">
+          <button
+            onClick={() => setActiveCategory(null)}
+            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+              !activeCategory
+                ? 'bg-blue-600 border-blue-500 text-white'
+                : 'border-gray-700 text-gray-500 hover:text-gray-300'
+            }`}
+          >
+            全部
+          </button>
+          {presentCategories.map((cat) => (
+            <button
+              key={cat}
+              onClick={() => setActiveCategory(activeCategory === cat ? null : cat)}
+              className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                activeCategory === cat
+                  ? 'bg-blue-600 border-blue-500 text-white'
+                  : 'border-gray-700 text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto space-y-1 min-h-0">
         {filtered.length === 0 && (
@@ -84,30 +132,26 @@ export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props)
             <span className="text-base mt-0.5 shrink-0">
               {PLATFORM_ICON[video.platform] ?? '🎬'}
             </span>
-
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-gray-200 truncate leading-tight">
-                {video.title}
-              </p>
+              <p className="text-xs font-medium text-gray-200 truncate leading-tight">{video.title}</p>
               <p className="text-xs text-gray-500 mt-0.5 truncate">
                 {video.channel}
                 {video.duration ? ` · ${formatDuration(video.duration)}` : ''}
                 {' · '}{formatDate(video.created_at)}
               </p>
-              {video.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {video.tags.slice(0, 3).map((tag) => (
-                    <span
-                      key={tag}
-                      className="text-[10px] bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded"
-                    >
-                      #{tag}
-                    </span>
-                  ))}
-                </div>
-              )}
+              <div className="flex flex-wrap gap-1 mt-1">
+                {video.category && (
+                  <span className="text-[10px] bg-blue-900/40 text-blue-400 px-1.5 py-0.5 rounded">
+                    {video.category}
+                  </span>
+                )}
+                {video.tags.slice(0, 2).map((tag) => (
+                  <span key={tag} className="text-[10px] bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded">
+                    #{tag}
+                  </span>
+                ))}
+              </div>
             </div>
-
             <button
               onClick={(e) => handleDelete(video.id, e)}
               disabled={deletingId === video.id}
@@ -119,6 +163,36 @@ export default function VideoLibrary({ videos, onDelete, onSelectVideo }: Props)
             </button>
           </div>
         ))}
+
+        {notes.length > 0 && (
+          <>
+            <div className="pt-2 pb-1 px-0.5">
+              <p className="text-[10px] text-gray-600 uppercase tracking-wide">导入笔记 ({notes.length})</p>
+            </div>
+            {notes.map((note) => (
+              <div
+                key={note.id}
+                onClick={() => onSelectNote?.(note)}
+                className="flex items-start gap-2.5 p-2.5 rounded-lg hover:bg-gray-800
+                  cursor-pointer transition-colors border border-transparent hover:border-gray-700"
+              >
+                <span className="text-base mt-0.5 shrink-0">📝</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-gray-200 truncate leading-tight">{note.title}</p>
+                  <p className="text-xs text-gray-500 mt-0.5 truncate">
+                    {note.file_type.toUpperCase()} · {note.word_count >= 1000 ? `${(note.word_count / 1000).toFixed(1)}k` : note.word_count} 字
+                    {' · '}{formatDate(note.created_at)}
+                  </p>
+                  {note.category && (
+                    <span className="text-[10px] bg-purple-900/40 text-purple-400 px-1.5 py-0.5 rounded mt-1 inline-block">
+                      {note.category}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   )

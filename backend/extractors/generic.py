@@ -16,7 +16,7 @@ def get_transcript(url: str) -> dict:
     """Generic extractor using yt-dlp + Whisper fallback for any platform."""
     import tempfile, os
 
-    _BASE = {"quiet": True, "no_warnings": True, "nocheckcertificate": True}
+    _BASE = {"quiet": True, "no_warnings": True, "nocheckcertificate": True, "legacy_server_connect": True}
 
     with yt_dlp.YoutubeDL(_BASE) as ydl:
         info = ydl.extract_info(url, download=False)
