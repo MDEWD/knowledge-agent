@@ -105,6 +105,9 @@ export type AgentEvent =
   | { type: 'agent_start'; agent: string; task: string }
   | { type: 'agent_done'; agent: string; summary: string }
   | { type: 'text'; content: string }
+  | { type: 'skills'; skills: { name: string; description: string }[] }
+  | { type: 'harness'; budget: BudgetSummary }
+  | { type: 'skill_learned'; count: number; names: string[] }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -188,5 +191,32 @@ export interface UserMemory {
   key_insights: string[]
   summary: string
   updated_at: string
+}
+
+// ── Harness & Skills ──────────────────────────────────────────────────────────
+
+export interface BudgetSummary {
+  input_tokens: number
+  output_tokens: number
+  tool_calls: number
+  limits: {
+    max_input_tokens: number | null
+    max_output_tokens: number | null
+    max_tool_calls: number | null
+  }
+}
+
+export interface SkillEntry {
+  skill_id: string
+  name: string
+  tags: string[]
+  created_at: number
+  use_count: number
+}
+
+export interface HarnessStatus {
+  circuit_state: 'closed' | 'open' | 'half-open'
+  failure_threshold: number
+  recovery_timeout: number
 }
 

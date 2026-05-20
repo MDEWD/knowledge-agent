@@ -1,8 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { streamAgentRun } from '../api/client'
-import type { AgentStep } from '../types'
+import { deleteSkill, fetchSkills, streamAgentRun } from '../api/client'
+import type { AgentStep, BudgetSummary, SkillEntry } from '../types'
 
 const AGENT_META: Record<string, { icon: string; color: string; desc: string }> = {
   ResearchAgent:  { icon: '🔍', color: 'blue',   desc: '知识库检索' },
@@ -22,7 +22,16 @@ export default function AgentPanel() {
   const [steps, setSteps] = useState<AgentStep[]>([])
   const [result, setResult] = useState('')
   const [error, setError] = useState('')
+  const [budget, setBudget] = useState<BudgetSummary | null>(null)
+  const [relevantSkills, setRelevantSkills] = useState<{ name: string; description: string }[]>([])
+  const [learnedSkills, setLearnedSkills] = useState<string[]>([])
+  const [allSkills, setAllSkills] = useState<SkillEntry[]>([])
+  const [showLibrary, setShowLibrary] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    fetchSkills().then((r) => setAllSkills(r.skills)).catch(() => {})
+  }, [])
 
   const run = async () => {
     const t = task.trim()
@@ -31,10 +40,15 @@ export default function AgentPanel() {
     setSteps([])
     setResult('')
     setError('')
+    setBudget(null)
+    setRelevantSkills([])
+    setLearnedSkills([])
 
     try {
       for await (const event of streamAgentRun(t)) {
-        if (event.type === 'plan') {
+        if (event.type === 'skills') {
+          setRelevantSkills(event.skills)
+        } else if (event.type === 'plan') {
           setSteps(event.steps)
         } else if (event.type === 'agent_start') {
           setSteps((prev) =>
@@ -53,6 +67,12 @@ export default function AgentPanel() {
         } else if (event.type === 'text') {
           setResult((r) => r + event.content)
           bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+        } else if (event.type === 'harness') {
+          setBudget(event.budget)
+        } else if (event.type === 'skill_learned') {
+          setLearnedSkills(event.names)
+          // Refresh the library
+          fetchSkills().then((r) => setAllSkills(r.skills)).catch(() => {})
         } else if (event.type === 'error') {
           setError(event.message)
         }
@@ -64,15 +84,58 @@ export default function AgentPanel() {
     }
   }
 
+  const handleDeleteSkill = async (skillId: string) => {
+    await deleteSkill(skillId).catch(() => {})
+    setAllSkills((prev) => prev.filter((s) => s.skill_id !== skillId))
+  }
+
   return (
     <div className="h-full flex flex-col gap-5 overflow-y-auto pb-4">
       {/* Header */}
-      <div>
-        <h2 className="text-lg font-semibold text-white mb-1">深度分析</h2>
-        <p className="text-sm text-gray-400">
-          多 Agent 并行协作：ResearchAgent + AnalysisAgent 同步执行，WritingAgent 综合输出
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-white mb-1">深度分析</h2>
+          <p className="text-sm text-gray-400">
+            多 Agent 并行协作 · Harness 保护 · Voyager 技能库
+          </p>
+        </div>
+        <button
+          onClick={() => setShowLibrary(!showLibrary)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors border border-gray-700"
+        >
+          <span>📚</span>
+          <span>技能库 {allSkills.length > 0 && `(${allSkills.length})`}</span>
+        </button>
       </div>
+
+      {/* Skill Library Panel */}
+      {showLibrary && (
+        <div className="bg-gray-800/60 rounded-xl border border-gray-700 p-4">
+          <p className="text-xs text-gray-500 uppercase tracking-wide mb-3">已学会的技能</p>
+          {allSkills.length === 0 ? (
+            <p className="text-xs text-gray-600">暂无技能。完成一次深度分析后，系统会自动提取可复用的技能。</p>
+          ) : (
+            <div className="space-y-2">
+              {allSkills.map((s) => (
+                <div key={s.skill_id} className="flex items-center justify-between gap-3 py-1.5">
+                  <div className="min-w-0">
+                    <p className="text-xs text-gray-300 truncate">{s.name}</p>
+                    <p className="text-[10px] text-gray-600 mt-0.5">
+                      使用 {s.use_count} 次 · {s.tags.join(', ') || '无标签'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleDeleteSkill(s.skill_id)}
+                    className="shrink-0 text-[10px] text-gray-600 hover:text-red-400 transition-colors"
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Input */}
       <div className="flex flex-col gap-2">
@@ -101,6 +164,18 @@ export default function AgentPanel() {
           </button>
         </div>
       </div>
+
+      {/* Relevant skills context (from library) */}
+      {relevantSkills.length > 0 && (
+        <div className="bg-indigo-900/20 border border-indigo-800 rounded-xl px-4 py-3">
+          <p className="text-xs text-indigo-400 font-medium mb-1.5">🧠 调用相关技能</p>
+          <div className="space-y-1">
+            {relevantSkills.map((s, i) => (
+              <p key={i} className="text-xs text-indigo-300/80">• {s.name}</p>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Execution Timeline */}
       {steps.length > 0 && (
@@ -137,6 +212,25 @@ export default function AgentPanel() {
               )
             })}
           </div>
+        </div>
+      )}
+
+      {/* Harness telemetry */}
+      {budget && (
+        <div className="bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-2.5 flex items-center gap-4 flex-wrap">
+          <span className="text-[10px] text-gray-500 uppercase tracking-wide font-medium">Harness</span>
+          <span className="text-xs text-gray-400">输入 {budget.input_tokens.toLocaleString()} tokens</span>
+          <span className="text-xs text-gray-400">输出 {budget.output_tokens.toLocaleString()} tokens</span>
+          <span className="text-xs text-gray-400">工具调用 {budget.tool_calls} 次</span>
+        </div>
+      )}
+
+      {/* Newly learned skills */}
+      {learnedSkills.length > 0 && (
+        <div className="bg-green-900/20 border border-green-800 rounded-xl px-4 py-2.5">
+          <p className="text-xs text-green-400">
+            ✨ 学习了 {learnedSkills.length} 个新技能：{learnedSkills.join('、')}
+          </p>
         </div>
       )}
 
@@ -179,3 +273,4 @@ export default function AgentPanel() {
     </div>
   )
 }
+

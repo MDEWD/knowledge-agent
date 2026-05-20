@@ -1151,6 +1151,25 @@ async def delete_note(note_id: str):
 
 # ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
 
+# Shared harness components (one per process)
+_harness_circuit = None
+_skill_store = None
+
+def _get_harness_circuit():
+    global _harness_circuit
+    if _harness_circuit is None:
+        from harness import CircuitBreaker
+        _harness_circuit = CircuitBreaker(failure_threshold=5, recovery_timeout=60.0)
+    return _harness_circuit
+
+def _get_skill_store():
+    global _skill_store
+    if _skill_store is None:
+        from skills import SkillStore
+        _skill_store = SkillStore("data/skills")
+    return _skill_store
+
+
 class AgentRunRequest(BaseModel):
     task: str
 
@@ -1161,12 +1180,58 @@ async def agent_run(req: AgentRunRequest):
 
     async def generate() -> AsyncGenerator[str, None]:
         from agents.orchestrator import OrchestratorAgent
+        from harness import AgentHarness, RetryPolicy, TokenBudget, Guardrails
+        from skills import SkillExtractor
+
+        # Retrieve relevant skills from the library and surface them to user
+        store = _get_skill_store()
+        relevant_skills = store.search(req.task, top_k=3)
+        if relevant_skills:
+            yield f"data: {json.dumps({'type': 'skills', 'skills': [{'name': s.name, 'description': s.description} for s in relevant_skills]}, ensure_ascii=False)}\n\n"
+
+        harness = AgentHarness(
+            guardrails=Guardrails(),
+            budget=TokenBudget(max_input_tokens=80_000, max_output_tokens=20_000, max_tool_calls=30),
+            circuit=_get_harness_circuit(),
+            policy=RetryPolicy(max_attempts=2, base_delay=1.0),
+        )
+
         orch = OrchestratorAgent(async_client, DEEPSEEK_MODEL)
         trace = tracer.trace("orchestrator", metadata={"task": req.task[:200]})
+        transcript_parts: list[str] = []
+        final_output = ""
+
         try:
+            # Pre-check input via guardrails
+            harness.guardrails.pre_check(req.task)
+
             async for event in orch.run_stream(req.task):
+                # Track transcript for skill extraction
+                if event.get("type") == "text":
+                    transcript_parts.append(event.get("content", ""))
+                    final_output += event.get("content", "")
+                elif event.get("type") in ("agent_done", "plan"):
+                    transcript_parts.append(json.dumps(event, ensure_ascii=False))
+
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            # Record circuit success
+            _get_harness_circuit().record_success()
+
+            # Emit harness telemetry to frontend
+            yield f"data: {json.dumps({'type': 'harness', 'budget': harness.budget.summary()}, ensure_ascii=False)}\n\n"
+
+            # Background skill extraction (non-blocking)
+            transcript = "\n".join(transcript_parts)
+            extractor = SkillExtractor(async_client, DEEPSEEK_MODEL)
+            new_skills = await extractor.extract(req.task, transcript)
+            for skill in new_skills:
+                store.save(skill)
+            if new_skills:
+                yield f"data: {json.dumps({'type': 'skill_learned', 'count': len(new_skills), 'names': [s.name for s in new_skills]}, ensure_ascii=False)}\n\n"
+
         except Exception as exc:
+            _get_harness_circuit().record_failure()
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         finally:
@@ -1177,6 +1242,34 @@ async def agent_run(req: AgentRunRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Skills API ───────────────────────────────────────────────────────────────
+
+@app.get("/api/skills")
+async def skills_list():
+    """Return all stored skills (index only, no procedure body)."""
+    store = _get_skill_store()
+    return {"skills": store.list_all()}
+
+
+@app.delete("/api/skills/{skill_id}")
+async def skills_delete(skill_id: str):
+    store = _get_skill_store()
+    store.delete(skill_id)
+    return {"ok": True}
+
+
+@app.get("/api/harness/status")
+async def harness_status():
+    """Return circuit breaker state and basic health info."""
+    from harness import CircuitBreaker
+    circuit = _get_harness_circuit()
+    return {
+        "circuit_state": circuit.state,
+        "failure_threshold": circuit.failure_threshold,
+        "recovery_timeout": circuit.recovery_timeout,
+    }
 
 
 # ── RAG Eval endpoints ────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote, AgentEvent, EvalResult } from '../types'
+import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus } from '../types'
 
 const BASE = '/api'
 
@@ -331,6 +331,26 @@ export async function runEvals(): Promise<EvalResult> {
 
 export async function fetchEvalResults(): Promise<EvalResult> {
   const res = await fetch(`${BASE}/evals/results`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+
+// ── Skills library ────────────────────────────────────────────────────────────
+
+export async function fetchSkills(): Promise<{ skills: SkillEntry[] }> {
+  const res = await fetch(`${BASE}/skills`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteSkill(skillId: string): Promise<void> {
+  const res = await fetch(`${BASE}/skills/${skillId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function fetchHarnessStatus(): Promise<HarnessStatus> {
+  const res = await fetch(`${BASE}/harness/status`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
