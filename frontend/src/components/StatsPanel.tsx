@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchStats } from '../api/client'
 import type { Stats } from '../types'
+import EvalPanel from './EvalPanel'
 
 function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -138,6 +139,8 @@ export default function StatsPanel() {
           </div>
         </div>
       </div>
+
+      <EvalPanel />
     </div>
   )
 }

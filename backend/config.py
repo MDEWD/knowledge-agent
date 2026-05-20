@@ -17,3 +17,8 @@ EMBED_MODEL = os.environ.get(
 )
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 MAX_TRANSCRIPT_CHARS = int(os.environ.get("MAX_TRANSCRIPT_CHARS", "80000"))
+
+# LangFuse observability — gracefully absent if keys not set
+LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")

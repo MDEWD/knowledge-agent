@@ -93,11 +93,12 @@ export default function ChatInterface({ suggestedVideo }: Props) {
               const existingUrls = new Set(existing.map((c) => c.url))
               const fresh = event.sources.filter((s) => !existingUrls.has(s.url))
               if (!fresh.length) return m
-              // Renumber globally so indices are continuous across multiple tool calls
               const reindexed = fresh.map((s, i) => ({ ...s, index: existing.length + i + 1 }))
               return { ...m, citations: [...existing, ...reindexed] }
             }),
           )
+        } else if (event.type === 'reflection') {
+          setToolActivity(`🔍 补充搜索：${event.gap}`)
         }
       }
     } catch (err) {

@@ -28,9 +28,11 @@ from extractors.generic import get_transcript as generic_transcript
 from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
 from processors.insights import extract_insights, parse_category, is_mainly_chinese, translate_to_chinese
+from processors.rag_enhancer import rewrite_query, rerank
 from storage.obsidian import save_to_obsidian, update_obsidian_note
 from storage.vector_store import add_document, add_note_document, delete_document, find_related, search
 from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note
+from observability.tracer import tracer
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -484,7 +486,15 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
 
     if name == "search_knowledge_base":
         query = args.get("query", "")
-        results = await loop.run_in_executor(None, search, query)
+        async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+
+        # Query rewriting — expand synonyms, clarify implicit context
+        rewritten = await rewrite_query(query, async_client, DEEPSEEK_MODEL)
+
+        # Retrieve wider candidate set, then rerank for precision
+        candidates = await loop.run_in_executor(None, search, rewritten, 20)
+        results = await loop.run_in_executor(None, rerank, query, candidates, 6)
+
         if not results:
             return "知识库中没有相关内容。", None, None
 
@@ -587,6 +597,34 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
     return "未知工具", None, None
 
 
+# ── Reflection helper ─────────────────────────────────────────────────────────
+
+async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
+    """
+    Check whether the agent's answer fully addresses the question.
+    Returns {"needs_more": bool, "gap": "description of missing info"}.
+    Fast, temperature=0, max_tokens=80.
+    """
+    prompt = (
+        "判断以下回答是否完整地回答了问题。\n"
+        "如果回答遗漏了重要信息，返回 JSON: {\"needs_more\": true, \"gap\": \"缺少XXX\"}\n"
+        "如果回答充分，返回 JSON: {\"needs_more\": false, \"gap\": \"\"}\n"
+        "只返回 JSON，不要解释。\n\n"
+        f"问题：{question}\n回答：{answer[:800]}"
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80,
+            response_format={"type": "json_object"},
+        )
+        return json.loads(resp.choices[0].message.content)
+    except Exception:
+        return {"needs_more": False, "gap": ""}
+
+
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
 
 @app.post("/api/chat/stream")
@@ -604,11 +642,24 @@ async def chat_stream(req: ChatRequest):
         ]
         messages = await _compress_history(messages, async_client)
         loop = asyncio.get_event_loop()
-        turn_citations: list[dict] = []  # accumulates across all tool calls this turn
+        turn_citations: list[dict] = []
+        accumulated_answer = ""
+        original_question = req.messages[-1].content if req.messages else ""
 
-        for _ in range(8):
+        # ── LangFuse trace ─────────────────────────────────────────────────
+        trace = tracer.trace("chat", metadata={"question": original_question[:200]})
+
+        for iteration in range(8):
             tool_calls_acc: dict[int, dict] = {}
             finish_reason: str | None = None
+            iter_text = ""
+
+            # Span for this LLM call
+            gen_span = tracer.generation(
+                trace, f"llm-iter-{iteration}",
+                model=DEEPSEEK_MODEL,
+                input_text=json.dumps(messages[-3:], ensure_ascii=False)[:1500],
+            )
 
             stream = await async_client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
@@ -618,10 +669,13 @@ async def chat_stream(req: ChatRequest):
                 stream=True,
             )
 
+            input_tokens = output_tokens = 0
             async for chunk in stream:
                 choice = chunk.choices[0]
                 delta = choice.delta
                 if delta.content:
+                    iter_text += delta.content
+                    accumulated_answer += delta.content
                     yield f"data: {json.dumps({'type': 'text', 'content': delta.content}, ensure_ascii=False)}\n\n"
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
@@ -637,6 +691,12 @@ async def chat_stream(req: ChatRequest):
                                 tool_calls_acc[i]["arguments"] += tc_delta.function.arguments
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
+                # Capture usage from last chunk
+                if hasattr(chunk, "usage") and chunk.usage:
+                    input_tokens = chunk.usage.prompt_tokens or 0
+                    output_tokens = chunk.usage.completion_tokens or 0
+
+            tracer.end_generation(gen_span, output_text=iter_text, input_tokens=input_tokens, output_tokens=output_tokens)
 
             if finish_reason != "tool_calls" or not tool_calls_acc:
                 break
@@ -652,10 +712,12 @@ async def chat_stream(req: ChatRequest):
                 label = _TOOL_LABELS.get(tool_name, tool_name)
                 yield f"data: {json.dumps({'type': 'tool_use', 'tool': tool_name, 'label': label}, ensure_ascii=False)}\n\n"
 
+                # Span for this tool call
+                tool_span = tracer.span(trace, f"tool:{tool_name}", input_data=tc["function"]["arguments"][:500])
                 result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop)
+                tracer.end_span(tool_span, output=result_str[:500])
 
                 if citations:
-                    # Renumber citations globally across multiple tool calls this turn
                     renumbered = []
                     seen_urls: set[str] = set(c["url"] for c in turn_citations)
                     for c in citations:
@@ -671,8 +733,38 @@ async def chat_stream(req: ChatRequest):
 
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_str})
 
+        # ── Reflection pass ────────────────────────────────────────────────
+        if accumulated_answer and original_question:
+            reflection = await _reflect(original_question, accumulated_answer, async_client)
+            if reflection.get("needs_more"):
+                gap = reflection.get("gap", "")
+                yield f"data: {json.dumps({'type': 'reflection', 'gap': gap}, ensure_ascii=False)}\n\n"
+                # Supplementary search targeting the identified gap
+                supp_candidates = await loop.run_in_executor(None, search, gap, 12)
+                supp_results = await loop.run_in_executor(None, rerank, gap, supp_candidates, 3)
+                if supp_results:
+                    supp_context = "\n\n".join(r["content"] for r in supp_results)
+                    supp_stream = await async_client.chat.completions.create(
+                        model=DEEPSEEK_MODEL,
+                        messages=[
+                            {"role": "system", "content": "根据补充信息，用1-3句话简短补充原回答中遗漏的部分。"},
+                            {"role": "user", "content": (
+                                f"原问题：{original_question}\n"
+                                f"已有回答：{accumulated_answer[:400]}\n\n"
+                                f"补充信息：{supp_context[:1000]}\n\n"
+                                "请补充："
+                            )},
+                        ],
+                        stream=True,
+                        max_tokens=300,
+                    )
+                    async for chunk in supp_stream:
+                        delta = chunk.choices[0].delta.content or ""
+                        if delta:
+                            yield f"data: {json.dumps({'type': 'text', 'content': delta}, ensure_ascii=False)}\n\n"
+
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        # Fire-and-forget: update long-term memory in background
+        tracer.flush()
         loop.run_in_executor(None, update_memory_from_conversation, req.as_dicts())
 
     return StreamingResponse(
@@ -1055,6 +1147,68 @@ async def delete_note(note_id: str):
     delete_document(note["url"])
     deleted = _delete_note(note_id)
     return {"deleted": deleted}
+
+
+# ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
+
+class AgentRunRequest(BaseModel):
+    task: str
+
+
+@app.post("/api/agent/run")
+async def agent_run(req: AgentRunRequest):
+    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+
+    async def generate() -> AsyncGenerator[str, None]:
+        from agents.orchestrator import OrchestratorAgent
+        orch = OrchestratorAgent(async_client, DEEPSEEK_MODEL)
+        trace = tracer.trace("orchestrator", metadata={"task": req.task[:200]})
+        try:
+            async for event in orch.run_stream(req.task):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        finally:
+            tracer.flush()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── RAG Eval endpoints ────────────────────────────────────────────────────────
+
+@app.post("/api/evals/generate")
+async def evals_generate(force: bool = False):
+    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    from evals.generate_test_cases import generate_test_cases
+    cases = await generate_test_cases(async_client, n=10, force=force)
+    return {"count": len(cases), "cases": cases}
+
+
+@app.post("/api/evals/run")
+async def evals_run():
+    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    from evals.generate_test_cases import generate_test_cases
+    from evals.eval_rag import run_eval_suite
+    cases = await generate_test_cases(async_client, n=10)
+    if not cases:
+        raise HTTPException(status_code=400, detail="知识库为空，无法生成测试用例。请先导入内容。")
+    result = await run_eval_suite(async_client, cases)
+    return result
+
+
+@app.get("/api/evals/results")
+async def evals_results():
+    from config import DATA_PATH
+    import json as _json
+    path = DATA_PATH / "eval_results.json"
+    if not path.exists():
+        return {"metrics": {}, "per_case": [], "timestamp": None}
+    return _json.loads(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

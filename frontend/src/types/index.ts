@@ -89,9 +89,51 @@ export interface Review {
   content: string
 }
 
-export type ActiveTab = 'add' | 'import' | 'chat' | 'note' | 'stats' | 'review' | 'article' | 'recall' | 'graph'
+export type ActiveTab = 'add' | 'import' | 'chat' | 'note' | 'stats' | 'review' | 'article' | 'recall' | 'graph' | 'agent'
 
-// ── Active Recall ─────────────────────────────────────────────────────────────
+// ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
+
+export interface AgentStep {
+  agent: string
+  task: string
+  status: 'pending' | 'running' | 'done' | 'error'
+  summary?: string
+}
+
+export type AgentEvent =
+  | { type: 'plan'; steps: AgentStep[] }
+  | { type: 'agent_start'; agent: string; task: string }
+  | { type: 'agent_done'; agent: string; summary: string }
+  | { type: 'text'; content: string }
+  | { type: 'error'; message: string }
+  | { type: 'done' }
+
+// ── RAG Eval ──────────────────────────────────────────────────────────────────
+
+export interface EvalCase {
+  question: string
+  ground_truth: string
+  answer: string
+  faithfulness: number
+  answer_relevancy: number
+  precision_at_3: number
+  retrieval_latency_ms: number
+  source_title: string
+}
+
+export interface EvalResult {
+  timestamp: string | null
+  case_count?: number
+  metrics: {
+    faithfulness?: number
+    answer_relevancy?: number
+    precision_at_3?: number
+    avg_retrieval_latency_ms?: number
+  }
+  per_case: EvalCase[]
+}
+
+
 
 export interface RecallCard {
   id: string

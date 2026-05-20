@@ -11,6 +11,7 @@ import RecallPanel from './components/RecallPanel'
 import GraphPanel from './components/GraphPanel'
 import MemorySidebar from './components/MemorySidebar'
 import NoteImportPanel from './components/NoteImportPanel'
+import AgentPanel from './components/AgentPanel'
 import { fetchVideos, fetchImportedNotes } from './api/client'
 import type { ActiveTab, ImportedNote, Video } from './types'
 
@@ -43,6 +44,7 @@ export default function App() {
     { id: 'import', label: '导入笔记' },
     { id: 'chat', label: '知识对话' },
     { id: 'note', label: '笔记', disabled: !selectedVideo },
+    { id: 'agent', label: '深度分析' },
     { id: 'article', label: '综合文章' },
     { id: 'recall', label: '主动回忆' },
     { id: 'graph', label: '知识图谱' },
@@ -123,6 +125,11 @@ export default function App() {
             />
           )}
           {activeTab === 'stats' && <StatsPanel />}
+          {activeTab === 'agent' && (
+            <div className="h-full overflow-y-auto">
+              <AgentPanel />
+            </div>
+          )}
           {activeTab === 'article' && <ArticlePanel />}
           {activeTab === 'review' && <ReviewPanel />}
           {activeTab === 'recall' && <RecallPanel videos={videos} />}

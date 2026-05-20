@@ -1,4 +1,4 @@
-import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote } from '../types'
+import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote, AgentEvent, EvalResult } from '../types'
 
 const BASE = '/api'
 
@@ -152,6 +152,7 @@ type ChatEvent =
   | { type: 'tool_use'; tool: string; label: string }
   | { type: 'suggestions'; videos: YoutubeVideoSuggestion[] }
   | { type: 'citations'; sources: CitationSource[] }
+  | { type: 'reflection'; gap: string }
   | { type: 'done' }
 
 export async function* streamChat(
@@ -285,5 +286,52 @@ export async function fetchImportedNotes(): Promise<ImportedNote[]> {
 export async function deleteImportedNote(id: string): Promise<void> {
   const res = await fetch(`${BASE}/notes/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
+}
+
+
+// ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
+
+export async function* streamAgentRun(task: string): AsyncGenerator<AgentEvent> {
+  const res = await fetch(`${BASE}/agent/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      try { yield JSON.parse(line.slice(6)) as AgentEvent } catch { /* ignore */ }
+    }
+  }
+}
+
+
+// ── RAG Eval ──────────────────────────────────────────────────────────────────
+
+export async function generateEvalCases(force = false): Promise<{ count: number }> {
+  const res = await fetch(`${BASE}/evals/generate?force=${force}`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function runEvals(): Promise<EvalResult> {
+  const res = await fetch(`${BASE}/evals/run`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function fetchEvalResults(): Promise<EvalResult> {
+  const res = await fetch(`${BASE}/evals/results`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
