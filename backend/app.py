@@ -1156,6 +1156,9 @@ _harness_circuit = None
 _skill_store = None
 _checkpoint_store = None
 
+# HITL: maps run_id → asyncio.Event waiting for human confirmation
+_pending_confirmations: dict[str, asyncio.Event] = {}
+
 def _get_harness_circuit():
     global _harness_circuit
     if _harness_circuit is None:
@@ -1180,7 +1183,7 @@ def _get_checkpoint_store():
 
 class AgentRunRequest(BaseModel):
     task: str
-    run_id: str | None = None   # optional: supply to resume a previous run
+    run_id: str | None = None   # supply to resume a previous run
 
 
 @app.post("/api/agent/run")
@@ -1205,6 +1208,11 @@ async def agent_run(req: AgentRunRequest):
             policy=RetryPolicy(max_attempts=2, base_delay=1.0),
         )
 
+        # HITL: create a per-run confirmation event
+        run_id = req.run_id or str(uuid.uuid4())
+        confirm_event = asyncio.Event()
+        _pending_confirmations[run_id] = confirm_event
+
         orch = OrchestratorAgent(
             async_client, DEEPSEEK_MODEL,
             checkpoint_store=_get_checkpoint_store(),
@@ -1219,7 +1227,11 @@ async def agent_run(req: AgentRunRequest):
             # Pre-check input via guardrails
             harness.guardrails.pre_check(req.task)
 
-            async for event in orch.run_stream(req.task, run_id=req.run_id):
+            async for event in orch.run_stream(
+                req.task,
+                run_id=run_id,
+                confirm_event=confirm_event,
+            ):
                 # Track transcript for skill extraction
                 if event.get("type") == "text":
                     transcript_parts.append(event.get("content", ""))
@@ -1249,6 +1261,7 @@ async def agent_run(req: AgentRunRequest):
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         finally:
+            _pending_confirmations.pop(run_id, None)
             tracer.flush()
 
     return StreamingResponse(
@@ -1256,6 +1269,16 @@ async def agent_run(req: AgentRunRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/agent/confirm/{run_id}")
+async def agent_confirm(run_id: str):
+    """HITL: signal that the user approved the orchestrator's plan."""
+    event = _pending_confirmations.get(run_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="No pending run with that ID.")
+    event.set()
+    return {"ok": True}
 
 
 # ── Skills API ───────────────────────────────────────────────────────────────

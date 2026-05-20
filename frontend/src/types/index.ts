@@ -117,6 +117,8 @@ export type AgentEvent =
   | { type: 'skill_learned'; count: number; names: string[] }
   | { type: 'error'; message: string }
   | { type: 'done' }
+  | { type: 'hitl_confirm'; run_id: string; steps: AgentStep[] }
+  | { type: 'sub_agent_tool'; agent: string; tool: string; label: string }
 
 // ── RAG Eval ──────────────────────────────────────────────────────────────────
 

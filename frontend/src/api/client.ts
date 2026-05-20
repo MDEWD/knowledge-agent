@@ -315,6 +315,10 @@ export async function* streamAgentRun(task: string): AsyncGenerator<AgentEvent> 
   }
 }
 
+export async function confirmAgentRun(runId: string): Promise<void> {
+  await fetch(`${BASE}/agent/confirm/${runId}`, { method: 'POST' })
+}
+
 
 // ── RAG Eval ──────────────────────────────────────────────────────────────────
 

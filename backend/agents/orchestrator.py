@@ -3,16 +3,23 @@ OrchestratorAgent: Plans, dispatches to sub-agents in parallel, then synthesizes
 
 Flow:
   1. plan(task) → decompose into subtasks for ResearchAgent + AnalysisAgent
-  2. asyncio.gather → run both sub-agents concurrently
+  2. HITL gate (optional): yield hitl_confirm, wait for human approval
+  3. Queue-based parallel streaming → run both sub-agents concurrently,
+     forwarding their sub_agent_tool events in real time as they arrive.
      Each sub-agent uses CompletionEvaluator to decide when it has enough.
-  3. WritingAgent → synthesize results into final streaming report
+  4. WritingAgent → synthesize results into final streaming report
 
 Checkpoint resume
 -----------------
 If a CheckpointStore is supplied and a prior run exists for run_id:
-  - step=1 in the checkpoint → research already done; skip Phase 2 research only.
-  - step=2               → both research and analysis done; jump straight to writing.
-This means a crash mid-run is resumable without re-running expensive LLM sub-agents.
+  - step=2 in the checkpoint → both sub-agents done; skip to WritingAgent.
+
+HITL (Human-in-the-Loop)
+-------------------------
+When confirm_event is supplied, the orchestrator yields a hitl_confirm event
+after planning and then awaits the event (max 120 s).  The caller (app.py)
+stores the event keyed by run_id and sets it when the user confirms via
+POST /api/agent/confirm/{run_id}.
 """
 from __future__ import annotations
 
@@ -51,14 +58,6 @@ class OrchestratorAgent:
     Parallel orchestrator: Research + Analysis run concurrently,
     each with an independent CompletionEvaluator, then WritingAgent
     synthesizes the combined results.
-
-    Parameters
-    ----------
-    client           AsyncOpenAI-compatible client.
-    model            Model to use for all agents.
-    checkpoint_store Optional CheckpointStore; when supplied the orchestrator
-                     saves a snapshot after each completed sub-agent phase so
-                     the run can be resumed after a crash.
     """
 
     def __init__(
@@ -90,6 +89,10 @@ class OrchestratorAgent:
         self.writer = WritingAgent(client, model,
                                    policy=policy, circuit=circuit)
 
+    # ------------------------------------------------------------------
+    # Planner
+    # ------------------------------------------------------------------
+
     async def _plan(self, task: str) -> dict:
         resp = await self.client.chat.completions.create(
             model=self.model,
@@ -112,36 +115,85 @@ class OrchestratorAgent:
     # Checkpoint helpers
     # ------------------------------------------------------------------
 
-    def _save_checkpoint(
-        self,
-        run_id: str,
-        task: str,
-        step: int,
-        metadata: dict,
-    ) -> None:
-        """Persist run state; no-op when no checkpoint_store is configured."""
+    def _save_checkpoint(self, run_id: str, task: str, step: int, metadata: dict) -> None:
         if self.checkpoint_store is None:
             return
         from harness.checkpoint import Checkpoint
-        cp = Checkpoint(
-            run_id=run_id,
-            task=task,
-            step=step,
-            history=[],      # orchestrator doesn't use message history
-            metadata=metadata,
-        )
+        cp = Checkpoint(run_id=run_id, task=task, step=step, history=[], metadata=metadata)
         self.checkpoint_store.save(cp)
 
     def _delete_checkpoint(self, run_id: str) -> None:
         if self.checkpoint_store is not None:
             self.checkpoint_store.delete(run_id)
 
-    def _load_checkpoint(self, run_id: str) -> "dict | None":
-        """Return checkpoint metadata dict, or None if nothing saved."""
+    def _load_checkpoint(self, run_id: str) -> dict | None:
         if self.checkpoint_store is None:
             return None
         cp = self.checkpoint_store.load(run_id)
         return cp.metadata if cp else None
+
+    # ------------------------------------------------------------------
+    # Queue-based parallel streaming
+    # ------------------------------------------------------------------
+
+    async def _stream_parallel(
+        self,
+        research_task: str,
+        analysis_task: str,
+        results_out: dict,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Run ResearchAgent and AnalysisAgent concurrently, yielding events in
+        arrival order.  Results are written to results_out when each agent
+        finishes (keyed by agent name).
+        """
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _drain(agent, agent_task):
+            try:
+                async for event in agent.run_stream(agent_task):
+                    await queue.put(event)
+                    if event["type"] == "sub_agent_done":
+                        results_out[agent.name] = {
+                            "result": event["result"],
+                            "stop_reason": event.get("stop_reason"),
+                        }
+            except Exception as exc:
+                # Surface error without crashing the orchestrator
+                results_out[agent.name] = {
+                    "result": f"[{agent.name} 执行出错: {exc}]",
+                    "stop_reason": str(exc),
+                }
+                await queue.put({
+                    "type": "sub_agent_done",
+                    "agent": agent.name,
+                    "result": results_out[agent.name]["result"],
+                    "stop_reason": str(exc),
+                })
+            finally:
+                await queue.put({"type": "_sentinel"})
+
+        t1 = asyncio.create_task(_drain(self.research, research_task))
+        t2 = asyncio.create_task(_drain(self.analysis, analysis_task))
+
+        pending = 2
+        while pending > 0:
+            event = await queue.get()
+            if event["type"] == "_sentinel":
+                pending -= 1
+            elif event["type"] == "sub_agent_done":
+                # Convert to public agent_done event for the frontend
+                yield {
+                    "type": "agent_done",
+                    "agent": event["agent"],
+                    "summary": event["result"][:300] + ("…" if len(event["result"]) > 300 else ""),
+                    "stop_reason": event.get("stop_reason") or "自然结束",
+                }
+            else:
+                # Forward sub_agent_tool events (and any others) transparently
+                yield event
+
+        await asyncio.gather(t1, t2, return_exceptions=True)
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -152,18 +204,17 @@ class OrchestratorAgent:
         task: str,
         *,
         run_id: str | None = None,
+        confirm_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Stream orchestration events:
-          plan → agent_start (×2) → agent_done (×2, with stop_reason)
-               → agent_start (writing) → text chunks → done
-
-        If run_id is provided and a checkpoint exists, completed phases are
-        skipped and previously-saved results are used directly.
+          plan → [hitl_confirm → await confirmation] →
+          agent_start (×2) + sub_agent_tool events → agent_done (×2) →
+          agent_start (writing) → text chunks → done
         """
         run_id = run_id or str(uuid.uuid4())
 
-        # ── Try to resume from checkpoint ─────────────────────────────────────
+        # ── Try to resume ──────────────────────────────────────────────────────
         saved = self._load_checkpoint(run_id)
         resuming_from_step = int(saved.get("step", 0)) if saved else 0
 
@@ -172,83 +223,57 @@ class OrchestratorAgent:
         research_task = plan.get("research_task", task)
         analysis_task = plan.get("analysis_task", task)
 
-        yield {
-            "type": "plan",
-            "steps": [
-                {"agent": "ResearchAgent", "task": research_task, "status": "pending"},
-                {"agent": "AnalysisAgent", "task": analysis_task, "status": "pending"},
-                {"agent": "WritingAgent", "task": "综合以上结果，撰写深度报告", "status": "pending"},
-            ],
-        }
+        plan_steps = [
+            {"agent": "ResearchAgent", "task": research_task, "status": "pending"},
+            {"agent": "AnalysisAgent", "task": analysis_task, "status": "pending"},
+            {"agent": "WritingAgent", "task": "综合以上结果，撰写深度报告", "status": "pending"},
+        ]
+        yield {"type": "plan", "steps": plan_steps}
+
+        # ── HITL gate ──────────────────────────────────────────────────────────
+        if confirm_event is not None:
+            yield {
+                "type": "hitl_confirm",
+                "run_id": run_id,
+                "steps": plan_steps,
+            }
+            try:
+                await asyncio.wait_for(confirm_event.wait(), timeout=120.0)
+            except asyncio.TimeoutError:
+                yield {
+                    "type": "error",
+                    "message": "等待确认超时（120 秒），任务已取消。",
+                }
+                return
 
         # ── Phase 2: Parallel execution ────────────────────────────────────────
         if resuming_from_step >= 2 and saved:
-            # Both sub-agents already completed — use saved results
             research_result = saved.get("research_result", "")
             analysis_result = saved.get("analysis_result", "")
-            research_decision_reason = saved.get("research_stop_reason", "已从断点恢复")
-            analysis_decision_reason = saved.get("analysis_stop_reason", "已从断点恢复")
 
             yield {"type": "agent_done", "agent": "ResearchAgent",
                    "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
-                   "stop_reason": research_decision_reason}
+                   "stop_reason": saved.get("research_stop_reason", "已从断点恢复")}
             yield {"type": "agent_done", "agent": "AnalysisAgent",
                    "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
-                   "stop_reason": analysis_decision_reason}
-
-        elif resuming_from_step == 1 and saved:
-            # Research done; only re-run analysis
-            research_result = saved.get("research_result", "")
-            research_decision_reason = saved.get("research_stop_reason", "已从断点恢复")
-
-            yield {"type": "agent_done", "agent": "ResearchAgent",
-                   "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
-                   "stop_reason": research_decision_reason}
-            yield {"type": "agent_start", "agent": "AnalysisAgent", "task": analysis_task}
-
-            analysis_result, analysis_decision = await self.analysis.run(analysis_task)
-            analysis_decision_reason = analysis_decision.reason if analysis_decision else "自然结束"
-
-            yield {"type": "agent_done", "agent": "AnalysisAgent",
-                   "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
-                   "stop_reason": analysis_decision_reason}
-
-            self._save_checkpoint(run_id, task, step=2, metadata={
-                "step": 2,
-                "research_result": research_result,
-                "research_stop_reason": research_decision_reason,
-                "analysis_result": analysis_result,
-                "analysis_stop_reason": analysis_decision_reason,
-            })
-
+                   "stop_reason": saved.get("analysis_stop_reason", "已从断点恢复")}
         else:
-            # Fresh run — execute both sub-agents in parallel
             yield {"type": "agent_start", "agent": "ResearchAgent", "task": research_task}
             yield {"type": "agent_start", "agent": "AnalysisAgent", "task": analysis_task}
 
-            (research_result, research_decision), (analysis_result, analysis_decision) = \
-                await asyncio.gather(
-                    self.research.run(research_task),
-                    self.analysis.run(analysis_task),
-                )
+            results: dict = {}
+            async for event in self._stream_parallel(research_task, analysis_task, results):
+                yield event
 
-            research_decision_reason = research_decision.reason if research_decision else "自然结束"
-            analysis_decision_reason = analysis_decision.reason if analysis_decision else "自然结束"
+            research_result = results.get("ResearchAgent", {}).get("result", "")
+            analysis_result = results.get("AnalysisAgent", {}).get("result", "")
 
-            yield {"type": "agent_done", "agent": "ResearchAgent",
-                   "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
-                   "stop_reason": research_decision_reason}
-            yield {"type": "agent_done", "agent": "AnalysisAgent",
-                   "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
-                   "stop_reason": analysis_decision_reason}
-
-            # Save full checkpoint so a crash before writing can resume here
             self._save_checkpoint(run_id, task, step=2, metadata={
                 "step": 2,
                 "research_result": research_result,
-                "research_stop_reason": research_decision_reason,
+                "research_stop_reason": results.get("ResearchAgent", {}).get("stop_reason", ""),
                 "analysis_result": analysis_result,
-                "analysis_stop_reason": analysis_decision_reason,
+                "analysis_stop_reason": results.get("AnalysisAgent", {}).get("stop_reason", ""),
             })
 
         # ── Phase 3: Writing (streaming) ───────────────────────────────────────
@@ -285,7 +310,5 @@ class OrchestratorAgent:
             "stop_reason": "报告撰写完成",
         }
 
-        # Clean up checkpoint now that the full run succeeded
         self._delete_checkpoint(run_id)
-
         yield {"type": "done"}
