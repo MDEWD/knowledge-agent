@@ -158,11 +158,12 @@ type ChatEvent =
 
 export async function* streamChat(
   messages: Pick<ChatMessage, 'role' | 'content'>[],
+  model = 'deepseek',
 ): AsyncGenerator<ChatEvent> {
   const res = await fetch(`${BASE}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, model }),
   })
 
   if (!res.ok) throw new Error(await res.text())

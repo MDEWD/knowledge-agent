@@ -8,6 +8,12 @@ let _idCounter = 0
 const nextId = () => String(++_idCounter)
 
 const STORAGE_KEY = 'chat_messages'
+const MODEL_STORAGE_KEY = 'chat_model'
+
+const MODELS = [
+  { id: 'deepseek', icon: '⚡', label: 'DeepSeek' },
+  { id: 'qwen',     icon: '🌙', label: '千问' },
+]
 const WELCOME: ChatMessage = {
   id: '0',
   role: 'assistant',
@@ -56,6 +62,9 @@ export default function ChatInterface({ suggestedVideo }: Props) {
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [expandedCalls, setExpandedCalls] = useState<Set<string>>(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [modelId, setModelId] = useState<string>(
+    () => localStorage.getItem(MODEL_STORAGE_KEY) ?? 'deepseek'
+  )
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const toolCallsRef = useRef<ToolCallRecord[]>([])
@@ -98,7 +107,7 @@ export default function ChatInterface({ suggestedVideo }: Props) {
     const history = [...baseMessages, userMsg].map(({ role, content }) => ({ role, content }))
 
     try {
-      for await (const event of streamChat(history)) {
+      for await (const event of streamChat(history, modelId)) {
         if (event.type === 'text') {
           setMessages((prev) =>
             prev.map((m) => m.id === assistantId ? { ...m, content: m.content + event.content } : m),
@@ -337,6 +346,25 @@ export default function ChatInterface({ suggestedVideo }: Props) {
 
       {/* Input area */}
       <div className="pt-3 border-t border-gray-800 shrink-0">
+        {/* Model selector */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-gray-600">模型</span>
+          {MODELS.map((m) => (
+            <button
+              key={m.id}
+              onClick={() => { setModelId(m.id); localStorage.setItem(MODEL_STORAGE_KEY, m.id) }}
+              disabled={loading}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs transition-colors border disabled:opacity-50 ${
+                modelId === m.id
+                  ? 'bg-blue-600/20 border-blue-600 text-blue-400'
+                  : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500'
+              }`}
+            >
+              <span>{m.icon}</span>
+              <span>{m.label}</span>
+            </button>
+          ))}
+        </div>
         <div className="flex gap-2 items-end">
           <textarea
             ref={textareaRef}

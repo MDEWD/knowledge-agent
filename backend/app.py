@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
 from extractors.generic import get_transcript as generic_transcript
 from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
@@ -115,6 +115,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    model: str = "deepseek"
 
     def as_dicts(self) -> list[dict]:
         return [m.model_dump() for m in self.messages]
@@ -455,7 +456,14 @@ _TOOL_LABELS: dict[str, str] = {
 _COMPRESS_AT = 14
 
 
-async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[dict]:
+def _get_llm_client(model_id: str) -> tuple[AsyncOpenAI, str]:
+    """Return (client, model_name) for the given model selector value."""
+    if model_id == "qwen":
+        return AsyncOpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL), QWEN_MODEL
+    return AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL), DEEPSEEK_MODEL
+
+
+async def _compress_history(messages: list[dict], client: AsyncOpenAI, model: str) -> list[dict]:
     non_system = [m for m in messages if m["role"] != "system"]
     if len(non_system) <= _COMPRESS_AT:
         return messages
@@ -467,7 +475,7 @@ async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[d
         for m in old if isinstance(m.get("content"), str)
     )
     resp = await client.chat.completions.create(
-        model=DEEPSEEK_MODEL, max_tokens=300,
+        model=model, max_tokens=300,
         messages=[
             {"role": "system", "content": "请用中文简洁总结以下对话的关键信息，100字以内。"},
             {"role": "user", "content": text},
@@ -477,7 +485,7 @@ async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[d
     return system_msgs + [{"role": "system", "content": f"【对话历史摘要】{summary}"}] + recent
 
 
-async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | None, list | None]:
+async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, model: str) -> tuple[str, list | None, list | None]:
     """Returns (result_text, youtube_suggestions, citations)."""
     try:
         args = json.loads(arguments)
@@ -486,10 +494,9 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
 
     if name == "search_knowledge_base":
         query = args.get("query", "")
-        async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
         # Query rewriting — expand synonyms, clarify implicit context
-        rewritten = await rewrite_query(query, async_client, DEEPSEEK_MODEL)
+        rewritten = await rewrite_query(query, client, model)
 
         # Retrieve wider candidate set, then rerank for precision
         candidates = await loop.run_in_executor(None, search, rewritten, 20)
@@ -599,7 +606,7 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
 
 # ── Reflection helper ─────────────────────────────────────────────────────────
 
-async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
+async def _reflect(question: str, answer: str, client: AsyncOpenAI, model: str) -> dict:
     """
     Check whether the agent's answer fully addresses the question.
     Returns {"needs_more": bool, "gap": "description of missing info"}.
@@ -614,7 +621,7 @@ async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
     )
     try:
         resp = await client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=80,
@@ -629,7 +636,7 @@ async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
 
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
-    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    async_client, active_model = _get_llm_client(req.model)
 
     async def generate() -> AsyncGenerator[str, None]:
         from processors.long_memory import get_memory_context, update_memory_from_conversation
@@ -640,7 +647,7 @@ async def chat_stream(req: ChatRequest):
             {"role": "system", "content": system_content},
             *req.as_dicts(),
         ]
-        messages = await _compress_history(messages, async_client)
+        messages = await _compress_history(messages, async_client, active_model)
         loop = asyncio.get_event_loop()
         turn_citations: list[dict] = []
         accumulated_answer = ""
@@ -657,12 +664,12 @@ async def chat_stream(req: ChatRequest):
             # Span for this LLM call
             gen_span = tracer.generation(
                 trace, f"llm-iter-{iteration}",
-                model=DEEPSEEK_MODEL,
+                model=active_model,
                 input_text=json.dumps(messages[-3:], ensure_ascii=False)[:1500],
             )
 
             stream = await async_client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
+                model=active_model,
                 max_tokens=2048,
                 messages=messages,
                 tools=_TOOLS,
@@ -714,7 +721,7 @@ async def chat_stream(req: ChatRequest):
 
                 # Span for this tool call
                 tool_span = tracer.span(trace, f"tool:{tool_name}", input_data=tc["function"]["arguments"][:500])
-                result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop)
+                result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop, async_client, active_model)
                 tracer.end_span(tool_span, output=result_str[:500])
 
                 if citations:
@@ -735,7 +742,7 @@ async def chat_stream(req: ChatRequest):
 
         # ── Reflection pass ────────────────────────────────────────────────
         if accumulated_answer and original_question:
-            reflection = await _reflect(original_question, accumulated_answer, async_client)
+            reflection = await _reflect(original_question, accumulated_answer, async_client, active_model)
             if reflection.get("needs_more"):
                 gap = reflection.get("gap", "")
                 yield f"data: {json.dumps({'type': 'reflection', 'gap': gap}, ensure_ascii=False)}\n\n"
@@ -745,7 +752,7 @@ async def chat_stream(req: ChatRequest):
                 if supp_results:
                     supp_context = "\n\n".join(r["content"] for r in supp_results)
                     supp_stream = await async_client.chat.completions.create(
-                        model=DEEPSEEK_MODEL,
+                        model=active_model,
                         messages=[
                             {"role": "system", "content": "根据补充信息，用1-3句话简短补充原回答中遗漏的部分。"},
                             {"role": "user", "content": (
