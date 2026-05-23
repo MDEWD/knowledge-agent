@@ -17,6 +17,7 @@ _TRANSLATE_CHUNK = 3000
 
 _ANALYZE_SYSTEM = (
     "你是一个知识分析专家。分析视频内容与已有知识库的关联，"
+    "所有文本字段使用简体中文，"
     "输出严格 JSON（不要 markdown 代码块，不要任何额外解释）。"
 )
 
@@ -46,7 +47,7 @@ _ANALYZE_PROMPT = """\
 
 _WIKI_SYSTEM = (
     "你是一个知识工程师。基于分析结果，生成结构化的 Wiki 知识页面，"
-    "用中文输出，Markdown 格式。对知识库中已有条目使用 [[条目标题]] 格式引用。"
+    "用简体中文输出，Markdown 格式。对知识库中已有条目使用 [[条目标题]] 格式引用。"
 )
 
 _WIKI_PROMPT = """\
@@ -108,7 +109,7 @@ def translate_to_chinese(text: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "你是专业翻译。将以下内容翻译成中文，保持原意和段落结构，只输出译文，不要任何解释。",
+                    "content": "你是专业翻译。将以下内容翻译成简体中文，保持原意和段落结构，只输出译文，不要任何解释。",
                 },
                 {"role": "user", "content": chunk},
             ],
