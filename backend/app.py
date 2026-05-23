@@ -365,6 +365,39 @@ _CHAT_SYSTEM = """\
 回答用中文。
 """
 
+# ── Content creation de-AI guide ──────────────────────────────────────────────
+# Injected when user intent is detected as content generation (小红书/文章/帖子等)
+
+_WRITING_KEYWORDS = [
+    "小红书", "公众号", "朋友圈", "写一篇", "生成一篇", "帮我写", "创作一篇",
+    "爆款", "帖子", "种草", "文案", "笔记风格", "写篇",
+]
+
+_CONTENT_WRITING_GUIDE = """\
+【内容创作模式】
+用户需要的是读起来像真人写的内容，不是AI报告。严格遵守：
+
+禁止使用（这些词句是AI味的主要来源）：
+- 程序化列举：首先/其次/再次/最后/第一点/第二点
+- 书面套话：综上所述、值得注意的是、不容忽视、总体而言、与此同时、不仅如此
+- 模糊形容：非常重要、效果显著、值得尝试、有一定帮助、具有重要意义
+- 工整并列句：「A不仅…而且…，不仅如此，还…」这类对称结构
+- 每段格式雷同（观点→解释→例子→小结 的模板感）
+
+写出真实感的方法：
+- 句子长短不一，可以有残缺句、感叹句，偶尔用破折号
+- 有强烈主观立场，不要和稀泥，敢说"这个方法根本没用"
+- 用具体数字和细节替代模糊词（"连续用了21天"而非"坚持一段时间后"）
+- 口语词自然插入：说真的、不夸张、老实讲、说白了、其实吧
+- 直接用"你"对话读者
+
+小红书格式要求：
+- 标题：数字+反常识或痛点，制造好奇（不要感叹号堆砌）
+- 首句：直接切入钩子，1-2句，不要铺垫背景
+- 正文：干货优先，短段落（3-4行换段），emoji用于标记重点而非装饰每行
+- 结尾：一个真实问题引导互动，不要"希望对你有帮助~"这类客套收尾
+"""
+
 _TOOLS = [
     {
         "type": "function",
@@ -692,10 +725,15 @@ async def chat_stream(req: ChatRequest):
         memory_ctx = get_memory_context()
         from processors.purpose_manager import get_purpose_context
         purpose_ctx = get_purpose_context()
+
+        last_user_msg = req.messages[-1].content if req.messages else ""
+        writing_ctx = _CONTENT_WRITING_GUIDE if any(kw in last_user_msg for kw in _WRITING_KEYWORDS) else ""
+
         system_content = (
             _CHAT_SYSTEM
             + ("\n\n" + purpose_ctx if purpose_ctx else "")
             + ("\n\n" + memory_ctx if memory_ctx else "")
+            + ("\n\n" + writing_ctx if writing_ctx else "")
         )
 
         messages: list[dict] = [
