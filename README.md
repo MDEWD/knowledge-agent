@@ -41,8 +41,10 @@
 - **ReAct 循环**：每个子 Agent 独立的思考→工具调用→观察循环（最多 5 步）
 - **执行轨迹可视化**：前端实时展示各 Agent 状态与摘要
 
-### Harness 运行时基础设施
-- **Guardrails**：输入输出双向安全检查（prompt 注入检测 + 敏感数据扫描）
+### Harness Engineering
+- **LessonStore**：每次 Agent 失败自动记录「什么错 → 根因 → 怎么改」，持久化到 `data/harness_lessons.json`，让 Agent 永不重蹈同一个错误
+- **AgentContextBuilder**：每次运行前把相关 Lesson 注入 system prompt 前缀，Agent 一开始就知道哪些坑要避开
+- **Guardrails（自修正版）**：输入输出双向安全检查，每条拦截规则携带 `Fix: ...` 自修正指令，不只是"你被拦了"而是告诉 Agent 怎么改
 - **TokenBudget**：per-run 输入/输出/工具调用次数上限，超限即中止
 - **Retry + CircuitBreaker**：指数退避抖动重试 + 三态熔断器（closed → open → half-open）
 - **Checkpoint**：Agent 运行状态原子落盘，崩溃后可从断点续跑
@@ -68,9 +70,14 @@
   ▼
 FastAPI (SSE 流式响应)
   │
-  ├─ Guardrails ──── 输入安全检查
+  ├─ Guardrails ──── 输入安全检查（含 Fix 自修正指令）
   ├─ TokenBudget ─── 资源限制
   ├─ CircuitBreaker ─ 熔断保护
+  │
+  ▼
+AgentHarness（Harness Engineering 核心）
+  ├─ LessonStore ──── 失败学习：记录错误 + 根因 + 修复方案
+  ├─ AgentContext ─── 运行前注入相关 Lesson 到 system prompt
   │
   ▼
 OrchestratorAgent
@@ -131,11 +138,13 @@ Dream Cycle（每日 03:17）：
 │   │   ├── analysis_agent.py       # 对比分析
 │   │   ├── writing_agent.py        # 报告撰写
 │   │   └── orchestrator.py         # 并行编排 + 流式输出
-│   ├── harness/                    # 运行时基础设施
-│   │   ├── agent_harness.py        # AgentHarness（组合所有组件）
+│   ├── harness/                    # Harness Engineering 基础设施
+│   │   ├── agent_harness.py        # AgentHarness（组合所有组件，含 .default() 工厂）
+│   │   ├── lessons.py              # LessonStore：失败学习，永不重蹈同一错误
+│   │   ├── context.py              # AgentContextBuilder：运行前注入 Lesson 上下文
 │   │   ├── budget.py               # TokenBudget
 │   │   ├── checkpoint.py           # 断点续跑
-│   │   ├── guardrails.py           # 输入输出安全检查
+│   │   ├── guardrails.py           # 输入输出安全检查（含 Fix 自修正指令）
 │   │   └── retry.py                # RetryPolicy + CircuitBreaker
 │   ├── skills/                     # Voyager 技能库
 │   │   ├── skill_store.py          # 持久化 + TF-IDF 检索
@@ -178,6 +187,8 @@ Dream Cycle（每日 03:17）：
         │   └── VideoInput.tsx       # 视频提交
         ├── api/client.ts            # 所有 API 请求
         └── types/index.ts           # 类型定义
+skills/
+└── setup-project.md                # /setup-project：一键配置 macOS / Windows 环境
 ```
 
 ## 快速开始
@@ -300,12 +311,14 @@ npm run dev
 ## Harness 组件说明
 
 ```
-AgentHarness
-├── Guardrails        # 正则拦截 prompt 注入 / 敏感数据泄露
-├── TokenBudget       # 输入 80k / 输出 20k / 工具调用 30 次
-├── CircuitBreaker    # 5 次连续失败 → open，60s 后 half-open 探测
-├── RetryPolicy       # 最多 2 次重试，指数退避 ± 15% 抖动
-└── CheckpointStore   # JSON 落盘，data/checkpoints/
+AgentHarness（Harness Engineering）
+├─ LessonStore        # 失败学习：错误 → 根因 → Fix，持久化到 data/harness_lessons.json
+├─ AgentContextBuilder # 运行前注入相关 Lesson，Agent 开局即知哪些坑要避
+├─ Guardrails         # 正则拦截 prompt 注入 / 敏感数据，每条规则携带 Fix 指令
+├─ TokenBudget        # 输入 80k / 输出 20k / 工具调用 30 次
+├─ CircuitBreaker     # 5 次连续失败 → open，60s 后 half-open 探测
+├─ RetryPolicy        # 最多 2 次重试，指数退避 ± 15% 抖动
+└─ CheckpointStore    # JSON 落盘，data/checkpoints/
 ```
 
 ## 常见问题
@@ -322,8 +335,11 @@ A: 项目已内置全局 SSL 验证跳过，适配自签名证书环境。
 **Q: CrossEncoder 首次加载很慢？**  
 A: `BAAI/bge-reranker-base` 约 280MB，首次从 HuggingFace 下载后本地缓存，后续秒级加载。
 
-**Q: 技能库是什么，怎么用？**  
-A: 每次深度分析成功后，LLM 自动从执行轨迹中提炼可复用的解题模式保存为"技能"。下次执行相似任务时，系统自动召回相关技能注入 Agent 上下文，提升回答质量（类 Voyager 机制）。
+**Q: Harness Engineering 是什么，和运行时中间件有什么区别？**  
+A: Harness Engineering（Mitchell Hashimoto 2026 年提出）的核心是：每次 Agent 犯错，就工程化地让它永不再犯。`LessonStore` 记录每次失败的根因和 Fix，`AgentContextBuilder` 在下次运行前把相关 Lesson 注入 system prompt。运行时中间件（retry / circuit breaker / budget）只管"这次跑"，Harness Engineering 管的是"跨次学习"。
+
+**Q: Lesson 存在哪里，怎么查看？**  
+A: 持久化在 `data/harness_lessons.json`，可通过 `GET /api/harness/status` 查看熔断器状态，Lesson 内容直接读 JSON 文件或扩展 API 接口。
 
 **Q: Dream Cycle 什么时候运行？**  
 A: 每天凌晨 3:17 自动运行，也可调用 `POST /api/dream-cycle/run` 手动触发。报告通过 `GET /api/dream-cycle/report` 查看。
