@@ -31,24 +31,52 @@ class GuardrailViolation(RuntimeError):
 # Default patterns
 # ---------------------------------------------------------------------------
 
-_DEFAULT_BLOCKED_PATTERNS: list[str] = [
-    # Prompt injection attempts
-    r"ignore\s+(all\s+)?previous\s+instructions",
-    r"forget\s+(all\s+)?previous\s+instructions",
-    r"you\s+are\s+now\s+(?:a\s+)?(?:DAN|evil|unconstrained)",
-    r"jailbreak",
-    # Shell / code injection probes
-    r"(?:;|\|{1,2}|&&)\s*(?:rm|wget|curl|bash|sh|exec)\b",
-    r"<script[\s>]",
-    r"javascript\s*:",
+# Each entry is (pattern, fix_instruction) so that violations carry
+# actionable remediation hints — not just "you were blocked".
+_DEFAULT_BLOCKED_PATTERNS: list[tuple[str, str]] = [
+    (
+        r"ignore\s+(all\s+)?previous\s+instructions",
+        "Do not attempt to override system instructions. Rephrase your request within allowed scope.",
+    ),
+    (
+        r"forget\s+(all\s+)?previous\s+instructions",
+        "Do not attempt to override system instructions. Rephrase your request within allowed scope.",
+    ),
+    (
+        r"you\s+are\s+now\s+(?:a\s+)?(?:DAN|evil|unconstrained)",
+        "Role-override prompts are not permitted. State your actual goal directly.",
+    ),
+    (
+        r"jailbreak",
+        "Jailbreak attempts are blocked. Describe what you need within normal boundaries.",
+    ),
+    (
+        r"(?:;|\|{1,2}|&&)\s*(?:rm|wget|curl|bash|sh|exec)\b",
+        "Shell injection sequences are not allowed. Use the provided tool APIs instead.",
+    ),
+    (
+        r"<script[\s>]",
+        "Inline scripts are not allowed in input. Strip HTML/JS tags before submitting.",
+    ),
+    (
+        r"javascript\s*:",
+        "JavaScript URI schemes are not allowed. Use plain text or approved tool calls.",
+    ),
 ]
 
-_DEFAULT_SENSITIVE_PATTERNS: list[str] = [
-    # Credential-shaped strings in outputs
-    r"(?i)(?:password|passwd|secret|api[_-]?key)\s*[:=]\s*\S{6,}",
-    r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----",
-    # Credit card numbers (Luhn format, 13-19 digits)
-    r"\b(?:\d[ -]?){13,19}\b",
+_DEFAULT_SENSITIVE_PATTERNS: list[tuple[str, str]] = [
+    (
+        r"(?i)(?:password|passwd|secret|api[_-]?key)\s*[:=]\s*\S{6,}",
+        "Output contains a credential-shaped string. Redact secrets before returning output.",
+    ),
+    (
+        r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----",
+        "Output contains a private key. Never include key material in responses.",
+    ),
+    (
+        r"\b(?:\d[ -]?){13,19}\b",
+        "Output may contain a card number. Mask or remove PAN data before returning.",
+    ),
 ]
 
 
@@ -70,10 +98,14 @@ class Guardrails:
     max_output_chars: int = 64_000
 
     def __post_init__(self) -> None:
-        blocked = _DEFAULT_BLOCKED_PATTERNS + self.extra_blocked
-        sensitive = _DEFAULT_SENSITIVE_PATTERNS + self.extra_sensitive
-        self._blocked_re = [re.compile(p, re.IGNORECASE) for p in blocked]
-        self._sensitive_re = [re.compile(p) for p in sensitive]
+        blocked = _DEFAULT_BLOCKED_PATTERNS + [(p, "") for p in self.extra_blocked]
+        sensitive = _DEFAULT_SENSITIVE_PATTERNS + [(p, "") for p in self.extra_sensitive]
+        self._blocked: list[tuple[re.Pattern, str]] = [
+            (re.compile(p, re.IGNORECASE), hint) for p, hint in blocked
+        ]
+        self._sensitive: list[tuple[re.Pattern, str]] = [
+            (re.compile(p), hint) for p, hint in sensitive
+        ]
 
     # ------------------------------------------------------------------
     # Public interface
@@ -85,16 +117,19 @@ class Guardrails:
 
         Raises GuardrailViolation on:
           - Input exceeding max_input_chars
-          - Any blocked pattern match
+          - Any blocked pattern match (with embedded fix instruction)
         """
         if len(text) > self.max_input_chars:
             raise GuardrailViolation(
-                f"Input too long: {len(text)} chars (limit {self.max_input_chars})"
+                f"Input too long: {len(text)} chars (limit {self.max_input_chars}). "
+                f"Fix: split the request into smaller chunks or summarise before submitting."
             )
-        for pattern in self._blocked_re:
+        for pattern, fix in self._blocked:
             if pattern.search(text):
+                hint = f" Fix: {fix}" if fix else ""
                 raise GuardrailViolation(
-                    f"Input blocked: matches pattern /{pattern.pattern}/"
+                    f"Input blocked — matches restricted pattern /{pattern.pattern}/."
+                    f"{hint}"
                 )
 
     def post_check(self, text: str) -> None:
@@ -103,18 +138,21 @@ class Guardrails:
 
         Raises GuardrailViolation on:
           - Output exceeding max_output_chars
-          - Any sensitive-data pattern match
+          - Any sensitive-data pattern match (with embedded fix instruction)
         """
         if len(text) > self.max_output_chars:
             raise GuardrailViolation(
-                f"Output too long: {len(text)} chars (limit {self.max_output_chars})"
+                f"Output too long: {len(text)} chars (limit {self.max_output_chars}). "
+                f"Fix: truncate or paginate the response before returning."
             )
-        for pattern in self._sensitive_re:
+        for pattern, fix in self._sensitive:
             if pattern.search(text):
                 logger.error(
-                    "[guardrails] sensitive pattern /%s/ detected in output",
-                    pattern.pattern,
+                    "[guardrails] sensitive pattern /%s/ in output", pattern.pattern
                 )
+                hint = f" Fix: {fix}" if fix else ""
                 raise GuardrailViolation(
-                    "Output blocked: contains potentially sensitive information"
+                    f"Output blocked — contains potentially sensitive information "
+                    f"matching /{pattern.pattern}/."
+                    f"{hint}"
                 )
