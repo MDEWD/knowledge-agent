@@ -50,3 +50,13 @@ def delete_video(video_id: str) -> bool:
         return False
     _save(new_videos)
     return True
+
+
+def batch_update_significance(scores: dict[str, float]) -> None:
+    """Bulk-update significance_score field for all videos in the scores dict."""
+    videos = _load()
+    for v in videos:
+        vid_id = v.get("id", "")
+        if vid_id in scores:
+            v["significance_score"] = scores[vid_id]
+    _save(videos)

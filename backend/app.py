@@ -28,10 +28,10 @@ from extractors.generic import get_transcript as generic_transcript
 from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
 from processors.insights import extract_insights, parse_category, is_mainly_chinese, translate_to_chinese
-from processors.rag_enhancer import rewrite_query, rerank
+from processors.rag_enhancer import rewrite_query, rerank, expand_queries, classify_intent, rerank_with_significance
 from storage.obsidian import save_to_obsidian, update_obsidian_note
 from storage.vector_store import add_document, add_note_document, delete_document, find_related, search
-from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note
+from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note, batch_update_significance
 from observability.tracer import tracer
 
 
@@ -43,6 +43,11 @@ _scheduler = AsyncIOScheduler()
 def _run_weekly_review() -> None:
     from processors.review import generate_weekly_review
     generate_weekly_review(days=7)
+
+
+def _run_dream_cycle() -> None:
+    from processors.dream_cycle import run_dream_cycle
+    run_dream_cycle()
 
 
 def _sync_bm25_from_chroma() -> None:
@@ -77,6 +82,12 @@ async def lifespan(app: FastAPI):
         _run_weekly_review,
         CronTrigger(day_of_week="mon", hour=9, minute=0),
         id="weekly_review",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _run_dream_cycle,
+        CronTrigger(hour=3, minute=17),
+        id="dream_cycle",
         replace_existing=True,
     )
     _scheduler.start()
@@ -495,15 +506,53 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
     if name == "search_knowledge_base":
         query = args.get("query", "")
 
-        # Query rewriting — expand synonyms, clarify implicit context
-        rewritten = await rewrite_query(query, client, model)
+        # Step 1: Classify intent to route to best retrieval strategy
+        intent = await classify_intent(query, client, model)
 
-        # Retrieve wider candidate set, then rerank for precision
-        candidates = await loop.run_in_executor(None, search, rewritten, 20)
-        results = await loop.run_in_executor(None, rerank, query, candidates, 6)
+        # Temporal queries: sort by recency instead of semantic search
+        if intent == "temporal":
+            from storage.video_db import list_videos as _lv
+            from storage.notes_db import list_notes as _ln
+            all_items = sorted(
+                [{"title": v["title"], "type": "视频", "created_at": v.get("created_at", ""), "url": v.get("url", "")} for v in _lv()] +
+                [{"title": n["title"], "type": "笔记", "created_at": n.get("imported_at", ""), "url": n.get("url", "")} for n in _ln()],
+                key=lambda x: x["created_at"],
+                reverse=True,
+            )[:10]
+            if not all_items:
+                return "知识库中暂无内容。", None, None
+            lines = [f"- [{i['type']}] 《{i['title']}》 {i['created_at'][:10] if i['created_at'] else ''}" for i in all_items]
+            return "最近导入的内容：\n" + "\n".join(lines), None, None
 
-        if not results:
+        # Step 2: Multi-query expansion for conceptual queries
+        if intent == "conceptual":
+            query_variants = await expand_queries(query, client, model)
+        else:
+            # Entity queries: use original + one rewrite, skip expansion
+            query_variants = [query]
+
+        # Step 3: Rewrite primary query, then search all variants, deduplicate via key
+        primary_rewritten = await rewrite_query(query, client, model)
+        all_queries = [primary_rewritten] + query_variants[1:]
+
+        seen_keys: set[str] = set()
+        all_candidates: list[dict] = []
+        for q in all_queries:
+            for c in await loop.run_in_executor(None, search, q, 15):
+                key = f"{c['metadata'].get('url', '')}::{c['metadata'].get('chunk_index', 0)}"
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_candidates.append(c)
+
+        if not all_candidates:
             return "知识库中没有相关内容。", None, None
+
+        # Step 4: Rerank with significance boost
+        from processors.significance import get_significance_map
+        sig_map = await loop.run_in_executor(None, get_significance_map)
+        results = await loop.run_in_executor(
+            None, rerank_with_significance, query, all_candidates, 6, sig_map
+        )
 
         from storage.vector_store import is_topic_covered
         covered = await loop.run_in_executor(None, is_topic_covered, query, 1, 1.0)
@@ -641,7 +690,13 @@ async def chat_stream(req: ChatRequest):
     async def generate() -> AsyncGenerator[str, None]:
         from processors.long_memory import get_memory_context, update_memory_from_conversation
         memory_ctx = get_memory_context()
-        system_content = _CHAT_SYSTEM + ("\n\n" + memory_ctx if memory_ctx else "")
+        from processors.purpose_manager import get_purpose_context
+        purpose_ctx = get_purpose_context()
+        system_content = (
+            _CHAT_SYSTEM
+            + ("\n\n" + purpose_ctx if purpose_ctx else "")
+            + ("\n\n" + memory_ctx if memory_ctx else "")
+        )
 
         messages: list[dict] = [
             {"role": "system", "content": system_content},
@@ -1063,6 +1118,78 @@ async def rebuild_graph():
     loop = asyncio.get_event_loop()
     from processors.knowledge_graph import build_graph
     return await loop.run_in_executor(None, build_graph, True)
+
+
+@app.get("/api/graph/gaps")
+async def get_graph_gaps():
+    loop = asyncio.get_event_loop()
+    from processors.knowledge_graph import analyze_gaps
+    return await loop.run_in_executor(None, analyze_gaps)
+
+
+class GapResearchRequest(BaseModel):
+    query: str
+    gap_title: str = ""
+
+
+@app.post("/api/graph/research-gap")
+async def research_gap(req: GapResearchRequest):
+    """Search internal knowledge base for a detected gap and return relevant results."""
+    loop = asyncio.get_event_loop()
+    from storage.vector_store import search
+    from processors.rag_enhancer import rerank
+    candidates = await loop.run_in_executor(None, search, req.query, 10)
+    ranked = await loop.run_in_executor(None, rerank, req.query, candidates, 5)
+    if not ranked:
+        return {"found": False, "gap_title": req.gap_title, "query": req.query, "results": []}
+    return {
+        "found": True,
+        "gap_title": req.gap_title,
+        "query": req.query,
+        "results": [
+            {
+                "title": r["metadata"].get("title", ""),
+                "content": r["content"][:300],
+                "url": r["metadata"].get("url", ""),
+            }
+            for r in ranked
+        ],
+    }
+
+
+class PurposeRequest(BaseModel):
+    content: str
+
+
+@app.get("/api/purpose")
+async def get_purpose():
+    from processors.purpose_manager import read_purpose, get_default_template
+    content = read_purpose()
+    return {"content": content, "template": get_default_template() if not content else ""}
+
+
+@app.post("/api/purpose")
+async def set_purpose(req: PurposeRequest):
+    from processors.purpose_manager import write_purpose
+    write_purpose(req.content)
+    return {"ok": True}
+
+
+# ── Dream Cycle endpoints ─────────────────────────────────────────────────────
+
+@app.get("/api/dream-cycle/report")
+async def dream_cycle_report():
+    from processors.dream_cycle import load_last_report
+    report = load_last_report()
+    if not report:
+        return {"status": "no_report", "message": "Dream Cycle 尚未运行"}
+    return report
+
+
+@app.post("/api/dream-cycle/run")
+async def dream_cycle_run(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_dream_cycle)
+    return {"status": "started", "message": "Dream Cycle 已在后台启动"}
 
 
 # ── Long-term Memory endpoints ────────────────────────────────────────────────

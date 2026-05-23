@@ -4,41 +4,57 @@
 
 ## 核心功能
 
-### 知识入库
+### 知识入库（两步链式思考）
 - **多平台支持**：YouTube、Bilibili、Twitter/X、Vimeo、TikTok 等
 - **自动提取文案**：优先平台原生字幕，无字幕时自动 Whisper 语音识别兜底
 - **笔记导入**：支持导入本地 `.md` / `.txt` 文件，自动向量化入库
-- **AI 提炼观点**：DeepSeek 自动生成摘要、主要观点、关键概念、行动启示
+- **两步链式录入**：Step 1 分析（提取实体、发现与已有知识的关联、识别矛盾）→ Step 2 生成（写带 `[[wikilink]]` 交叉引用的 Wiki 页面）
 - **自动分类归档**：AI 判断类别，写入 Obsidian 对应文件夹
+- **知识库定位（Purpose）**：`data/purpose.md` 定义知识库方向，所有录入与问答均参考此上下文
 
 ### 智能问答（RAG）
+- **意图感知路由**：自动识别时间型（"最近加了什么"）、实体型（"XXX讲了什么"）、概念型三类查询，走不同检索路径
+- **Multi-Query 扩展**：概念型查询自动生成 3 个语义变体，多路检索后合并去重，提升召回率
 - **混合检索**：ChromaDB 密集向量 + BM25 稀疏检索，RRF 融合排序
-- **Query Rewriting**：LLM 改写用户问题，扩展语义、补全隐含背景
-- **Cross-Encoder Reranking**：`BAAI/bge-reranker-base` 精排 top-k，中英双语
+- **Query Rewriting**：LLM 改写用户问题，注入知识库定位上下文
+- **显著性增强排序**：CrossEncoder × (1 + 0.2 × significance\_score)，高质量内容靠前
 - **反思机制（Reflection）**：答案生成后自动检测遗漏点，不足时触发补充搜索
 - **带引用的回答**：答案末尾附出处视频/笔记标题
 - **对话持久化**：历史消息存入 LocalStorage，切换 Tab 不丢失
+
+### Dream Cycle（后台自主维护）
+- **每日凌晨自动运行**（APScheduler 3:17 AM），无需手动触发
+- **显著性重算**：综合图谱连接数(40%) + SM-2 复习表现(30%) + 复习次数(20%) + 标签数(10%)
+- **断链扫描**：检测 Obsidian 笔记中指向不存在页面的 `[[wikilinks]]`
+- **矛盾收集**：汇总知识关联段落中被标注的矛盾观点
+- **孤立节点识别**：找出与其他内容关联稀少（degree ≤ 1）的视频
+- 报告写入 `data/dream_cycle_report.json`，可通过 API 读取
+
+### 知识图谱
+- **force-directed 布局**：自动排布视频节点与共享概念节点
+- **缺口检测**：识别孤立节点、意外跨类别连接，LLM 生成针对性研究建议
+- **研究缺口**：对每个知识缺口在库内搜索现有相关内容，辅助判断优先级
+- **交互**：滚轮缩放、拖拽平移、悬浮高亮关联节点
 
 ### 多 Agent 深度分析
 - **Orchestrator 并行架构**：ResearchAgent + AnalysisAgent `asyncio.gather` 并行执行，WritingAgent 汇总输出
 - **ReAct 循环**：每个子 Agent 独立的思考→工具调用→观察循环（最多 5 步）
 - **执行轨迹可视化**：前端实时展示各 Agent 状态与摘要
 
-### Harness 运行时基础设施（Agent = Model + Harness）
+### Harness 运行时基础设施
 - **Guardrails**：输入输出双向安全检查（prompt 注入检测 + 敏感数据扫描）
 - **TokenBudget**：per-run 输入/输出/工具调用次数上限，超限即中止
 - **Retry + CircuitBreaker**：指数退避抖动重试 + 三态熔断器（closed → open → half-open）
 - **Checkpoint**：Agent 运行状态原子落盘，崩溃后可从断点续跑
 - **可观测性**：LangFuse 全链路追踪（无 Key 时优雅降级为 no-op）
 
-### Voyager 技能库（Skill Library）
+### Voyager 技能库
 - **自动技能提取**：成功运行后 LLM 自动从 transcript 中提炼可复用技能
 - **TF-IDF 语义检索**：新任务启动时自动召回相关技能，注入 Agent 上下文
 - **持久化管理**：技能 JSON 落盘，前端可查看/删除
 
 ### 其他能力
 - **主动回忆（Spaced Repetition）**：SM-2 算法生成复习卡片
-- **知识图谱**：force-directed 图谱展示视频与概念关联
 - **长期记忆**：跨会话用户兴趣与知识空白画像
 - **综合文章生成**：跨视频主题文章自动撰写
 - **RAG 评测体系**：LLM-as-Judge 自动生成测试集，评测 Faithfulness / Answer Relevancy / Precision@3
@@ -68,9 +84,21 @@ OrchestratorAgent
   ├─ SkillExtractor ─ 提取技能 → SkillStore
   └─ LangFuse Tracer ─ 全链路追踪
 
+知识录入链路（两步）：
+  字幕 → [Step 1] 分析（实体/关联/矛盾/缺口 → JSON）
+       → [Step 2] 生成（Wiki 页 + [[wikilinks]] + 待研究缺口）
+       → Obsidian + ChromaDB + BM25
+
 RAG 检索链路：
-  Query → LLM Rewrite → ChromaDB + BM25 (召回 20) → CrossEncoder Rerank (top 6)
-       → 反思检查 → 补充搜索（可选）→ 带引用答案
+  Query → 意图分类 → 时间型: 按 created_at 排序返回
+                   → 实体型: 单路检索
+                   → 概念型: Multi-Query 扩展(×3) → 多路搜索合并
+         → ChromaDB + BM25 (每路15) → 去重合并
+         → CrossEncoder × Significance Boost (top 6)
+         → 反思检查 → 补充搜索（可选）→ 带引用答案
+
+Dream Cycle（每日 03:17）：
+  显著性重算 → 断链扫描 → 矛盾收集 → 孤立节点识别 → 报告落盘
 ```
 
 ## 技术栈
@@ -79,7 +107,7 @@ RAG 检索链路：
 |------|------|
 | 后端框架 | Python 3.11 · FastAPI · SSE 实时流 |
 | 前端 | React 18 · TypeScript · Vite · Tailwind CSS |
-| 大模型 | DeepSeek API（OpenAI 兼容格式） |
+| 大模型 | DeepSeek API（OpenAI 兼容格式）· 通义千问（可选） |
 | 语音识别 | OpenAI Whisper（本地 CPU 推理） |
 | 向量存储 | ChromaDB · sentence-transformers 多语言嵌入 |
 | 稀疏检索 | BM25（rank-bm25） |
@@ -87,7 +115,7 @@ RAG 检索链路：
 | 可观测性 | LangFuse（cloud.langfuse.com） |
 | 笔记存储 | Obsidian Vault（本地 Markdown） |
 | 视频提取 | yt-dlp · bilibili-api-python · youtube-transcript-api |
-| 定时任务 | APScheduler（每周自动复盘） |
+| 定时任务 | APScheduler（每周复盘 + 每日 Dream Cycle） |
 
 ## 目录结构
 
@@ -105,8 +133,8 @@ RAG 检索链路：
 │   │   └── orchestrator.py         # 并行编排 + 流式输出
 │   ├── harness/                    # 运行时基础设施
 │   │   ├── agent_harness.py        # AgentHarness（组合所有组件）
-│   │   ├── budget.py               # TokenBudget + BudgetExceededError
-│   │   ├── checkpoint.py           # CheckpointStore（断点续跑）
+│   │   ├── budget.py               # TokenBudget
+│   │   ├── checkpoint.py           # 断点续跑
 │   │   ├── guardrails.py           # 输入输出安全检查
 │   │   └── retry.py                # RetryPolicy + CircuitBreaker
 │   ├── skills/                     # Voyager 技能库
@@ -118,8 +146,12 @@ RAG 检索链路：
 │   ├── observability/
 │   │   └── tracer.py               # LangFuse 封装（no-op 降级）
 │   ├── processors/
-│   │   ├── insights.py             # 知识提炼 + 分类
-│   │   ├── rag_enhancer.py         # Query Rewriting + CrossEncoder Reranking
+│   │   ├── insights.py             # 两步链式知识提炼（分析→Wiki页）
+│   │   ├── rag_enhancer.py         # Multi-Query扩展 + 意图分类 + Reranking
+│   │   ├── knowledge_graph.py      # 图谱构建 + 缺口检测
+│   │   ├── purpose_manager.py      # 知识库定位文件管理
+│   │   ├── significance.py         # 显著性评分计算
+│   │   ├── dream_cycle.py          # 后台自主维护任务
 │   │   └── review.py               # 每周复盘生成
 │   ├── extractors/
 │   │   ├── youtube.py
@@ -127,19 +159,18 @@ RAG 检索链路：
 │   │   ├── generic.py              # yt-dlp 通用提取
 │   │   └── whisper_fallback.py
 │   └── storage/
-│       ├── vector_store.py         # ChromaDB + add_note_document（句子级分块）
+│       ├── vector_store.py         # ChromaDB + 句子级分块
 │       ├── bm25_store.py           # BM25 稀疏索引
-│       ├── obsidian.py
-│       └── video_db.py
+│       ├── obsidian.py             # Obsidian Vault 写入
+│       └── video_db.py             # 视频元数据 + 显著性分数
 └── frontend/
     └── src/
         ├── components/
-        │   ├── AgentPanel.tsx       # 深度分析（技能库 + Harness 遥测）
-        │   ├── ChatInterface.tsx    # RAG 对话（带引用 + 反思标签）
+        │   ├── AgentPanel.tsx       # 深度分析
+        │   ├── ChatInterface.tsx    # RAG 对话（带引用 + 反思）
         │   ├── EvalPanel.tsx        # RAG 评测面板
-        │   ├── GraphPanel.tsx       # 知识图谱
+        │   ├── GraphPanel.tsx       # 知识图谱（force-directed）
         │   ├── MemorySidebar.tsx    # 长期记忆
-        │   ├── NoteEditor.tsx       # 笔记编辑
         │   ├── NoteImportPanel.tsx  # 本地笔记导入
         │   ├── RecallPanel.tsx      # 主动回忆（SM-2）
         │   ├── ReviewPanel.tsx      # 每周复盘
@@ -184,6 +215,10 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
 OBSIDIAN_VAULT=/path/to/vault/Videos
 
+# 可选：通义千问（用于模型切换）
+QWEN_API_KEY=your_key
+QWEN_MODEL=qwen-plus
+
 # 可选：LangFuse 可观测性（不填则静默跳过）
 LANGFUSE_PUBLIC_KEY=pk-lf-xxx
 LANGFUSE_SECRET_KEY=sk-lf-xxx
@@ -204,6 +239,27 @@ npm run dev
 # http://localhost:5173
 ```
 
+### 3. 配置知识库定位（可选但推荐）
+
+在 `backend/data/purpose.md` 中描述你的知识库方向：
+
+```markdown
+# 知识库定位
+
+## 目标描述
+专注于 AI 技术、商业创业、个人成长领域的深度学习。
+
+## 关键问题
+- AI Agent 如何在实际业务中落地？
+- 创业公司如何在资源有限时高效增长？
+
+## 研究范围
+重点：AI/ML、创业方法论、个人效率
+排除：娱乐内容、新闻时事
+```
+
+或直接调用 `POST /api/purpose` 接口写入。
+
 ## API 路由
 
 | 方法 | 路径 | 说明 |
@@ -212,8 +268,16 @@ npm run dev
 | GET | `/api/status/{task_id}` | SSE 进度流 |
 | GET | `/api/videos` | 视频列表 |
 | DELETE | `/api/videos/{id}` | 删除视频 |
-| POST | `/api/chat` | RAG 对话（SSE 流式） |
+| POST | `/api/chat/stream` | RAG 对话（SSE 流式） |
 | POST | `/api/agent/run` | 多 Agent 深度分析（SSE 流式） |
+| GET | `/api/graph` | 知识图谱数据 |
+| POST | `/api/graph/rebuild` | 强制重建图谱 |
+| GET | `/api/graph/gaps` | 检测知识缺口 |
+| POST | `/api/graph/research-gap` | 在库内搜索某缺口的现有内容 |
+| GET | `/api/purpose` | 读取知识库定位 |
+| POST | `/api/purpose` | 更新知识库定位 |
+| GET | `/api/dream-cycle/report` | 读取最近一次 Dream Cycle 报告 |
+| POST | `/api/dream-cycle/run` | 手动触发 Dream Cycle |
 | GET | `/api/skills` | 技能库列表 |
 | DELETE | `/api/skills/{id}` | 删除技能 |
 | GET | `/api/harness/status` | 熔断器状态 |
@@ -222,7 +286,6 @@ npm run dev
 | GET | `/api/evals/results` | 最近评测结果 |
 | GET | `/api/stats` | 知识库统计 |
 | GET | `/api/memory` | 长期用户记忆 |
-| GET | `/api/graph` | 知识图谱数据 |
 
 ## RAG 评测指标
 
@@ -261,3 +324,12 @@ A: `BAAI/bge-reranker-base` 约 280MB，首次从 HuggingFace 下载后本地缓
 
 **Q: 技能库是什么，怎么用？**  
 A: 每次深度分析成功后，LLM 自动从执行轨迹中提炼可复用的解题模式保存为"技能"。下次执行相似任务时，系统自动召回相关技能注入 Agent 上下文，提升回答质量（类 Voyager 机制）。
+
+**Q: Dream Cycle 什么时候运行？**  
+A: 每天凌晨 3:17 自动运行，也可调用 `POST /api/dream-cycle/run` 手动触发。报告通过 `GET /api/dream-cycle/report` 查看。
+
+**Q: 两步链式录入会不会更慢？**  
+A: 多一次 LLM 分析调用（约 2-3 秒），但生成的 Wiki 页质量更高，并自动与已有内容建立 `[[wikilinks]]` 关联。首次录入（库为空）时两步几乎无差异。
+
+**Q: 知识库定位（Purpose）有什么用？**  
+A: 定义 purpose 后，录入时 LLM 会在该方向下提炼观点（而不是泛泛总结），问答时 query rewriting 也会根据方向扩展语义，显著减少跑偏回答。
