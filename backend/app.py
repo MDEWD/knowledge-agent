@@ -1513,6 +1513,33 @@ async def evals_results():
     return _json.loads(path.read_text(encoding="utf-8"))
 
 
+@app.post("/api/evals/agent/run")
+async def evals_agent_run():
+    """
+    Run the full agent evaluation suite:
+      - Tool Use: intent classification accuracy
+      - Reflection: quality gain from self-critique
+      - Task Success Rate: SIMPLE / MEDIUM / HARD (VitaBench-inspired)
+      - Multi-agent Synergy: single vs multi-agent output quality
+      - Multi-turn Stability: conversation degradation over 6 turns
+    """
+    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    from evals.eval_agent_tasks import run_agent_eval
+    result = await run_agent_eval(async_client)
+    return result
+
+
+@app.get("/api/evals/agent/results")
+async def evals_agent_results():
+    """Return cached agent eval results."""
+    from config import DATA_PATH
+    import json as _json
+    path = DATA_PATH / "eval_agent_results.json"
+    if not path.exists():
+        return {"summary": {}, "timestamp": None}
+    return _json.loads(path.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
