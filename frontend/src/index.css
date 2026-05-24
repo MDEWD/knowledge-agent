@@ -43,3 +43,135 @@
 .prose-custom p {
   @apply text-sm mb-2;
 }
+
+/* ── Light Mode ─────────────────────────────────────────────────────────────── */
+
+html.light { color-scheme: light; }
+
+/* Backgrounds */
+html.light .bg-gray-900  { background-color: #ffffff !important; }
+html.light .bg-gray-800  { background-color: #f3f4f6 !important; }
+html.light .bg-gray-750  { background-color: #eaecf0 !important; }
+html.light .bg-gray-700  { background-color: #e5e7eb !important; }
+html.light .bg-gray-600  { background-color: #d1d5db !important; }
+
+/* Text */
+html.light .text-white   { color: #111827 !important; }
+html.light .text-gray-100 { color: #1f2937 !important; }
+html.light .text-gray-200 { color: #374151 !important; }
+html.light .text-gray-300 { color: #4b5563 !important; }
+html.light .text-gray-400 { color: #6b7280 !important; }
+html.light .text-gray-500 { color: #6b7280 !important; }
+html.light .text-gray-600 { color: #9ca3af !important; }
+
+/* Blue text: override light blues to readable dark blues */
+html.light .text-blue-300 { color: #1d4ed8 !important; }
+html.light .text-blue-400 { color: #1d4ed8 !important; }
+
+/* Blue backgrounds: restore white text so buttons stay legible */
+html.light .bg-blue-600   { color: #ffffff !important; }
+html.light .bg-blue-500   { color: #ffffff !important; }
+
+/* Borders */
+html.light .border-gray-900 { border-color: #e5e7eb !important; }
+html.light .border-gray-800 { border-color: #e5e7eb !important; }
+html.light .border-gray-700 { border-color: #d1d5db !important; }
+html.light .border-gray-600 { border-color: #9ca3af !important; }
+
+/* Hover states */
+html.light .hover\:bg-gray-800:hover   { background-color: #e5e7eb !important; }
+html.light .hover\:bg-gray-700:hover   { background-color: #d1d5db !important; }
+html.light .hover\:text-gray-300:hover { color: #374151 !important; }
+html.light .hover\:text-white:hover    { color: #111827 !important; }
+html.light .hover\:border-gray-500:hover { border-color: #9ca3af !important; }
+
+/* Translucent / opacity backgrounds */
+html.light .bg-gray-800\/20 { background-color: rgba(0,0,0,0.04) !important; }
+html.light .bg-gray-800\/50 { background-color: rgba(243,244,246,0.8) !important; }
+html.light .bg-gray-800\/60 { background-color: #e9ecef !important; }
+html.light .bg-gray-700\/50 { background-color: rgba(229,231,235,0.6) !important; }
+html.light .bg-gray-700\/60 { background-color: rgba(229,231,235,0.8) !important; }
+html.light .bg-gray-900\/50 { background-color: rgba(255,255,255,0.7) !important; }
+html.light .bg-gray-700\/60 { background-color: rgba(243,244,246,0.6) !important; }
+html.light .bg-blue-500\/10 { background-color: rgba(59,130,246,0.08) !important; }
+html.light .bg-blue-600\/15 { background-color: rgba(59,130,246,0.1) !important; }
+html.light .bg-blue-600\/20 { background-color: rgba(59,130,246,0.12) !important; }
+html.light .bg-blue-500\/50 { background-color: rgba(59,130,246,0.2) !important; }
+
+/* Colored note-type badges */
+html.light .bg-purple-900\/40 { background-color: #ede9fe !important; }
+html.light .text-purple-300   { color: #7c3aed !important; }
+html.light .border-purple-800 { border-color: #c4b5fd !important; }
+html.light .bg-red-900\/40    { background-color: #fee2e2 !important; }
+html.light .text-red-300      { color: #dc2626 !important; }
+html.light .border-red-800    { border-color: #fca5a5 !important; }
+html.light .text-blue-300     { color: #1d4ed8 !important; }
+html.light .border-blue-800   { border-color: #93c5fd !important; }
+html.light .bg-blue-900\/40   { background-color: #dbeafe !important; }
+html.light .bg-green-900\/40  { background-color: #dcfce7 !important; }
+html.light .text-green-300    { color: #16a34a !important; }
+html.light .border-green-800  { border-color: #86efac !important; }
+
+/* Agent execution cards — /30 opacity variants & -700 borders */
+html.light .bg-blue-900\/30   { background-color: #dbeafe !important; }
+html.light .border-blue-700   { border-color: #3b82f6 !important; }
+html.light .bg-purple-900\/30 { background-color: #ede9fe !important; }
+html.light .border-purple-700 { border-color: #8b5cf6 !important; }
+html.light .bg-green-900\/30  { background-color: #dcfce7 !important; }
+html.light .border-green-700  { border-color: #22c55e !important; }
+
+/* Platform selector buttons — YouTube (red) & Bilibili (pink) */
+html.light .text-red-400       { color: #dc2626 !important; }
+html.light .text-red-300       { color: #b91c1c !important; }
+html.light .bg-red-600\/10     { background-color: rgba(220,38,38,0.08) !important; }
+html.light .bg-red-500\/20     { background-color: rgba(220,38,38,0.14) !important; }
+html.light .border-red-600     { border-color: #dc2626 !important; }
+html.light .border-red-500     { border-color: #ef4444 !important; }
+html.light .text-pink-400      { color: #db2777 !important; }
+html.light .text-pink-300      { color: #be185d !important; }
+html.light .bg-pink-600\/10    { background-color: rgba(219,39,119,0.08) !important; }
+html.light .bg-pink-500\/20    { background-color: rgba(219,39,119,0.14) !important; }
+html.light .border-pink-600    { border-color: #db2777 !important; }
+html.light .border-pink-500    { border-color: #ec4899 !important; }
+
+/* Amber — HITL confirmation card & agent status */
+html.light .bg-amber-900\/20   { background-color: #fffbeb !important; }
+html.light .border-amber-700   { border-color: #d97706 !important; }
+html.light .text-amber-300     { color: #92400e !important; }
+html.light .text-amber-400     { color: #b45309 !important; }
+html.light .text-amber-200\/80 { color: #78350f !important; }
+html.light .text-amber-400\/60 { color: #b45309 !important; }
+html.light .text-amber-400\/70 { color: #b45309 !important; }
+
+/* Cyan — Agent inter-collaboration card */
+html.light .bg-cyan-900\/20    { background-color: #ecfeff !important; }
+html.light .border-cyan-800\/60 { border-color: #0891b2 !important; }
+html.light .text-cyan-300      { color: #0e7490 !important; }
+html.light .text-cyan-200\/70  { color: #155e75 !important; }
+html.light .text-cyan-300\/40  { color: #0e7490 !important; }
+html.light .bg-cyan-800\/50    { background-color: #0891b2 !important; }
+
+/* Yellow / warning */
+html.light .bg-yellow-900\/30          { background-color: #fef9c3 !important; }
+html.light .border-yellow-700          { border-color: #f59e0b !important; }
+html.light .text-yellow-300            { color: #92400e !important; }
+html.light .text-yellow-500            { color: #b45309 !important; }
+html.light .bg-yellow-700              { background-color: #d97706 !important; }
+html.light .hover\:bg-yellow-600:hover { background-color: #b45309 !important; }
+
+/* Status cards */
+html.light .bg-green-900\/20 { background-color: #f0fdf4 !important; }
+html.light .text-green-400   { color: #16a34a !important; }
+html.light .bg-red-900\/20   { background-color: #fff1f2 !important; }
+html.light .text-red-400     { color: #dc2626 !important; }
+html.light .border-red-800   { border-color: #fca5a5 !important; }
+
+/* Scrollbar */
+html.light ::-webkit-scrollbar-thumb { background-color: #d1d5db; }
+
+/* Prose overrides */
+html.light .prose-custom            { color: #374151; }
+html.light .prose-custom h2         { color: #2563eb; }
+html.light .prose-custom h3         { color: #374151; }
+html.light .prose-custom strong     { color: #111827; }
+html.light .prose-custom code       { background-color: #f3f4f6; color: #16a34a; }

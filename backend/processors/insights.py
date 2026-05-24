@@ -4,6 +4,14 @@ import re
 from openai import OpenAI
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, MAX_TRANSCRIPT_CHARS
 
+try:
+    from zhconv import convert as _zhconv
+    def to_simplified(text: str) -> str:
+        return _zhconv(text, 'zh-hans')
+except ImportError:
+    def to_simplified(text: str) -> str:
+        return text
+
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 CATEGORIES = [
@@ -115,7 +123,7 @@ def translate_to_chinese(text: str) -> str:
             ],
         )
         parts.append(resp.choices[0].message.content or chunk)
-    return "\n\n".join(parts)
+    return to_simplified("\n\n".join(parts))
 
 
 def _get_existing_titles() -> list[str]:
@@ -173,6 +181,7 @@ def _format_analysis_summary(analysis: dict) -> str:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_insights(transcript: str, metadata: dict) -> str:
+    transcript = to_simplified(transcript)
     if len(transcript) > MAX_TRANSCRIPT_CHARS:
         transcript = transcript[:MAX_TRANSCRIPT_CHARS] + "\n\n...[字幕已截断，仅处理前段内容]"
 

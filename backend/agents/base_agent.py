@@ -101,7 +101,7 @@ class BaseAgent:
 
     async def _request_final_answer(
         self, messages: list[dict], stop_decision: StopDecision | None = None
-    ) -> str:
+    ) -> tuple[str, dict]:
         hint = ""
         if stop_decision:
             hint = f"（判断依据：{stop_decision.reason}）"
@@ -114,7 +114,10 @@ class BaseAgent:
             messages=messages,
             temperature=0.3,
         )
-        return resp.choices[0].message.content or ""
+        usage = {}
+        if resp.usage:
+            usage = {"input_tokens": resp.usage.prompt_tokens or 0, "output_tokens": resp.usage.completion_tokens or 0}
+        return resp.choices[0].message.content or "", usage
 
     async def run_stream(
         self, task: str, context: str = ""
@@ -138,6 +141,8 @@ class BaseAgent:
         messages.append({"role": "user", "content": task})
 
         all_tool_calls: list[ToolCallSummary] = []
+        total_input_tokens = 0
+        total_output_tokens = 0
 
         for step in range(MAX_STEPS):
             resp = await self._llm(
@@ -148,6 +153,9 @@ class BaseAgent:
             )
             choice = resp.choices[0]
             msg = choice.message
+            if resp.usage:
+                total_input_tokens += resp.usage.prompt_tokens or 0
+                total_output_tokens += resp.usage.completion_tokens or 0
 
             # ── 1. Natural stop ───────────────────────────────────────────────
             if choice.finish_reason != "tool_calls" or not msg.tool_calls:
@@ -158,6 +166,7 @@ class BaseAgent:
                     "result": msg.content or "",
                     "stop_reason": None,
                     "stop_confidence": None,
+                    "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens, "tool_calls": len(all_tool_calls)},
                 }
                 return
 
@@ -216,25 +225,31 @@ class BaseAgent:
                         "[%s] evaluator stopped at step %d: %s",
                         self.name, step + 1, decision.reason,
                     )
-                    final = await self._request_final_answer(messages, decision)
+                    final, final_usage = await self._request_final_answer(messages, decision)
+                    total_input_tokens += final_usage.get("input_tokens", 0)
+                    total_output_tokens += final_usage.get("output_tokens", 0)
                     yield {
                         "type": "sub_agent_done",
                         "agent": self.name,
                         "result": final,
                         "stop_reason": decision.reason,
                         "stop_confidence": decision.confidence,
+                        "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens, "tool_calls": len(all_tool_calls)},
                     }
                     return
 
         # ── 4. Hard MAX_STEPS ceiling ─────────────────────────────────────────
         logger.warning("[%s] hit MAX_STEPS=%d — forcing final answer", self.name, MAX_STEPS)
-        final = await self._request_final_answer(messages)
+        final, final_usage = await self._request_final_answer(messages)
+        total_input_tokens += final_usage.get("input_tokens", 0)
+        total_output_tokens += final_usage.get("output_tokens", 0)
         yield {
             "type": "sub_agent_done",
             "agent": self.name,
             "result": final,
             "stop_reason": f"Reached hard limit of {MAX_STEPS} steps.",
             "stop_confidence": 1.0,
+            "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens, "tool_calls": len(all_tool_calls)},
         }
 
     async def run(self, task: str, context: str = "") -> tuple[str, StopDecision | None]:

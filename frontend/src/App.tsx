@@ -20,6 +20,19 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('add')
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null)
   const [prefillUrl, setPrefillUrl] = useState('')
+  const [isDark, setIsDark] = useState(() => {
+    const saved = localStorage.getItem('theme')
+    return saved ? saved === 'dark' : true
+  })
+
+  useEffect(() => {
+    if (isDark) {
+      document.documentElement.classList.remove('light')
+    } else {
+      document.documentElement.classList.add('light')
+    }
+    localStorage.setItem('theme', isDark ? 'dark' : 'light')
+  }, [isDark])
 
   useEffect(() => {
     fetchVideos().then(setVideos).catch(console.error)
@@ -54,9 +67,18 @@ export default function App() {
     <div className="flex h-screen bg-gray-900 text-white overflow-hidden">
       {/* Sidebar */}
       <aside className="w-72 border-r border-gray-800 flex flex-col p-4 shrink-0">
-        <div className="mb-5">
-          <h1 className="text-base font-bold text-white">知识库 Agent</h1>
-          <p className="text-xs text-gray-500 mt-0.5">视频 → 笔记 → 对话</p>
+        <div className="mb-5 flex items-start justify-between">
+          <div>
+            <h1 className="text-base font-bold text-white">知识库 Agent</h1>
+            <p className="text-xs text-gray-500 mt-0.5">视频 → 笔记 → 对话</p>
+          </div>
+          <button
+            onClick={() => setIsDark((v) => !v)}
+            className="mt-0.5 text-gray-500 hover:text-gray-300 transition-colors text-lg leading-none"
+            title={isDark ? '切换到浅色模式' : '切换到深色模式'}
+          >
+            {isDark ? '☀️' : '🌙'}
+          </button>
         </div>
         <div className="flex-1 min-h-0">
           <VideoLibrary

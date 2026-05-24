@@ -241,6 +241,7 @@ class OrchestratorAgent:
                             "type": "agent_done", "agent": "ResearchAgent",
                             "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
                             "stop_reason": event.get("stop_reason") or "自然结束",
+                            "usage": event.get("usage"),
                         }
                     else:
                         yield event
@@ -267,6 +268,7 @@ class OrchestratorAgent:
                         "type": "agent_done", "agent": "AnalysisAgent",
                         "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
                         "stop_reason": event.get("stop_reason") or "自然结束",
+                        "usage": event.get("usage"),
                     }
 
                 elif (event["type"] == "sub_agent_tool"
@@ -318,19 +320,26 @@ class OrchestratorAgent:
             messages=messages,
             temperature=0.5,
             stream=True,
+            stream_options={"include_usage": True},
         )
         full_text = ""
+        writing_input_tokens = 0
+        writing_output_tokens = 0
         async for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
             if delta:
                 full_text += delta
                 yield {"type": "text", "content": delta}
+            if chunk.usage:
+                writing_input_tokens = chunk.usage.prompt_tokens or 0
+                writing_output_tokens = chunk.usage.completion_tokens or 0
 
         yield {
             "type": "agent_done",
             "agent": "WritingAgent",
             "summary": full_text[:300] + ("…" if len(full_text) > 300 else ""),
             "stop_reason": "报告撰写完成",
+            "usage": {"input_tokens": writing_input_tokens, "output_tokens": writing_output_tokens, "tool_calls": 0},
         }
 
         self._delete_checkpoint(run_id)

@@ -1394,6 +1394,9 @@ async def agent_run(req: AgentRunRequest):
         trace = tracer.trace("orchestrator", metadata={"task": req.task[:200]})
         transcript_parts: list[str] = []
         final_output = ""
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_tool_calls = 0
 
         try:
             # Pre-check input via guardrails
@@ -1408,16 +1411,32 @@ async def agent_run(req: AgentRunRequest):
                 if event.get("type") == "text":
                     transcript_parts.append(event.get("content", ""))
                     final_output += event.get("content", "")
-                elif event.get("type") in ("agent_done", "plan"):
+                elif event.get("type") == "plan":
                     transcript_parts.append(json.dumps(event, ensure_ascii=False))
+                elif event.get("type") == "agent_done":
+                    transcript_parts.append(json.dumps(event, ensure_ascii=False))
+                    u = event.get("usage") or {}
+                    total_input_tokens += u.get("input_tokens", 0)
+                    total_output_tokens += u.get("output_tokens", 0)
+                    total_tool_calls += u.get("tool_calls", 0)
 
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             # Record circuit success
             _get_harness_circuit().record_success()
 
-            # Emit harness telemetry to frontend
-            yield f"data: {json.dumps({'type': 'harness', 'budget': harness.budget.summary()}, ensure_ascii=False)}\n\n"
+            # Emit harness telemetry to frontend with real accumulated usage
+            real_budget = {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "tool_calls": total_tool_calls,
+                "limits": {
+                    "max_input_tokens": 80_000,
+                    "max_output_tokens": 20_000,
+                    "max_tool_calls": 30,
+                },
+            }
+            yield f"data: {json.dumps({'type': 'harness', 'budget': real_budget}, ensure_ascii=False)}\n\n"
 
             # Background skill extraction (non-blocking)
             transcript = "\n".join(transcript_parts)
