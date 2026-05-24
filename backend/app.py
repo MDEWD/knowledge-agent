@@ -1370,8 +1370,16 @@ async def agent_run(req: AgentRunRequest):
         # Retrieve relevant skills from the library and surface them to user
         store = _get_skill_store()
         relevant_skills = store.search(req.task, top_k=3)
+        injected_skill_ids = [s.skill_id for s in relevant_skills]
         if relevant_skills:
             yield f"data: {json.dumps({'type': 'skills', 'skills': [{'name': s.name, 'description': s.description} for s in relevant_skills]}, ensure_ascii=False)}\n\n"
+
+        # Inject lessons from lesson store into task context
+        from harness.lessons import LessonStore
+        from harness.context import AgentContextBuilder
+        lesson_store = LessonStore(DATA_PATH / "harness_lessons.json")
+        context_builder = AgentContextBuilder(lesson_store)
+        lesson_context = context_builder.build(req.task)
 
         harness = AgentHarness(
             guardrails=Guardrails(),
@@ -1406,6 +1414,7 @@ async def agent_run(req: AgentRunRequest):
                 req.task,
                 run_id=run_id,
                 confirm_event=confirm_event,
+                lesson_context=lesson_context,
             ):
                 # Track transcript for skill extraction
                 if event.get("type") == "text":
@@ -1446,6 +1455,15 @@ async def agent_run(req: AgentRunRequest):
                 store.save(skill)
             if new_skills:
                 yield f"data: {json.dumps({'type': 'skill_learned', 'count': len(new_skills), 'names': [s.name for s in new_skills]}, ensure_ascii=False)}\n\n"
+
+            # Feedback loop: score output and update effectiveness on injected lessons/skills
+            if final_output and (injected_skill_ids or context_builder.last_injected_ids):
+                from evals.rubric_scorer import score_response
+                rubric = await score_response(req.task, final_output[:1500], "", async_client)
+                if context_builder.last_injected_ids:
+                    lesson_store.record_outcome(context_builder.last_injected_ids, rubric.normalised)
+                if injected_skill_ids:
+                    store.record_outcome(injected_skill_ids, rubric.normalised)
 
         except Exception as exc:
             _get_harness_circuit().record_failure()

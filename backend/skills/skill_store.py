@@ -53,6 +53,7 @@ class Skill:
     source_task: str = ""
     created_at: float = field(default_factory=time.time)
     use_count: int = 0
+    effectiveness_score: float = 0.5  # EMA of rubric scores after injection (0-1)
 
     # ------------------------------------------------------------------
     # Serialisation
@@ -203,6 +204,21 @@ class SkillStore:
             self.save(skill)
             skills.append(skill)
         return skills
+
+    def record_outcome(self, skill_ids: list[str], score: float) -> None:
+        """Update effectiveness score (EMA) for skills used in a completed run."""
+        for sid in skill_ids:
+            skill = self.get(sid)
+            if skill is None:
+                continue
+            skill.effectiveness_score = round(
+                0.7 * skill.effectiveness_score + 0.3 * score, 3
+            )
+            self.save(skill)
+            logger.debug(
+                "[skills] outcome skill_id=%s score=%.2f new_eff=%.3f",
+                sid, score, skill.effectiveness_score,
+            )
 
     def list_all(self) -> list[dict]:
         """Return all index entries (lightweight — no skill bodies)."""

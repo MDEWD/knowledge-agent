@@ -156,6 +156,7 @@ class OrchestratorAgent:
         *,
         run_id: str | None = None,
         confirm_event: asyncio.Event | None = None,
+        lesson_context: str = "",
     ) -> AsyncGenerator[dict, None]:
         """
         Stream orchestration events:
@@ -165,14 +166,16 @@ class OrchestratorAgent:
           agent_start(Writing) → text chunks → agent_done(Writing) → done
         """
         run_id = run_id or str(uuid.uuid4())
+        # Prepend harness lessons to task so all sub-agents benefit
+        enriched_task = f"{lesson_context}\n\n{task}".strip() if lesson_context else task
 
         # ── Try to resume ──────────────────────────────────────────────────────
         saved = self._load_checkpoint(run_id)
         resuming_from_step = int(saved.get("step", 0)) if saved else 0
 
         # ── Phase 1: Plan ──────────────────────────────────────────────────────
-        plan = await self._plan(task)
-        research_task = plan.get("research_task", task)
+        plan = await self._plan(enriched_task)
+        research_task = plan.get("research_task", enriched_task)
         analysis_task = plan.get("analysis_task", task)
 
         plan_steps = [

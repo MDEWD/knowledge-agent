@@ -28,7 +28,15 @@ def _get_collection() -> chromadb.Collection:
 
 def add_document(insights: str, metadata: dict) -> None:
     col = _get_collection()
-    chunks = [p.strip() for p in insights.split("\n\n") if len(p.strip()) > 40]
+    paras = [p.strip() for p in insights.split("\n\n") if len(p.strip()) > 40]
+
+    # Add one-paragraph overlap: prefix each chunk with the tail of the previous one
+    chunks = []
+    for i, para in enumerate(paras):
+        if i > 0:
+            chunks.append(paras[i - 1][-200:] + "\n\n" + para)
+        else:
+            chunks.append(para)
 
     ids, docs, metas, bm25_items = [], [], [], []
     for i, chunk in enumerate(chunks):
@@ -51,28 +59,40 @@ def add_document(insights: str, metadata: dict) -> None:
 
 
 def add_note_document(text: str, metadata: dict) -> None:
-    """Index note text with sentence-aware chunking (~500 chars per chunk)."""
+    """Index note text with sentence-aware chunking (~500 chars, 1-sentence overlap)."""
     col = _get_collection()
 
-    # Split on Chinese/English sentence endings, keeping the delimiter
+    # Split on Chinese/English sentence endings
     raw = re.split(r'(?<=[。！？.!?])\s*', text)
-    chunks: list[str] = []
-    current = ""
-    for sent in raw:
-        sent = sent.strip()
-        if not sent:
-            continue
-        if len(current) + len(sent) + 1 <= 500:
-            current = (current + " " + sent).strip()
-        else:
-            if len(current) > 30:
-                chunks.append(current)
-            current = sent
-    if len(current) > 30:
-        chunks.append(current)
+    sentences = [s.strip() for s in raw if s.strip()]
 
-    if not chunks:
+    # Group sentences into ~500-char chunks
+    sent_groups: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for sent in sentences:
+        if current_len + len(sent) + 1 <= 500:
+            current.append(sent)
+            current_len += len(sent) + 1
+        else:
+            if current_len > 30:
+                sent_groups.append(current)
+            current = [sent]
+            current_len = len(sent)
+    if current_len > 30:
+        sent_groups.append(current)
+
+    if not sent_groups:
         return
+
+    # Build chunks with 1-sentence overlap from the previous group
+    chunks = []
+    for i, group in enumerate(sent_groups):
+        if i > 0 and sent_groups[i - 1]:
+            overlap = sent_groups[i - 1][-1]  # last sentence of previous chunk
+            chunks.append(overlap + " " + " ".join(group))
+        else:
+            chunks.append(" ".join(group))
 
     ids, docs, metas, bm25_items = [], [], [], []
     for i, chunk in enumerate(chunks):

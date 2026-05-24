@@ -37,6 +37,8 @@ class Lesson:
     hit_count: int = 1
     created_at: float = field(default_factory=time.time)
     last_seen_at: float = field(default_factory=time.time)
+    effectiveness_score: float = 0.5  # EMA of rubric scores after injection (0-1)
+    injection_count: int = 0          # how many times this lesson was injected
 
 
 class LessonStore:
@@ -106,16 +108,37 @@ class LessonStore:
     # ------------------------------------------------------------------
 
     def query(self, task: str, top_k: int = 5) -> list[Lesson]:
-        """Return lessons most relevant to the current task (by keyword overlap)."""
+        """Return lessons most relevant to the current task, weighted by effectiveness."""
         task_words = set(_keywords(task))
         scored: list[tuple[float, Lesson]] = []
         for lesson in self._lessons.values():
             overlap = len(task_words & set(lesson.pattern_keywords))
             if overlap:
-                score = overlap + lesson.hit_count * 0.1
+                # effectiveness > 0.5 boosts, < 0.5 penalises
+                effectiveness_weight = lesson.effectiveness_score * 2 - 1  # maps 0-1 → -1..+1
+                score = overlap + lesson.hit_count * 0.1 + effectiveness_weight * 0.5
                 scored.append((score, lesson))
         scored.sort(key=lambda x: -x[0])
         return [l for _, l in scored[:top_k]]
+
+    def record_outcome(self, lesson_ids: list[str], score: float) -> None:
+        """Update effectiveness score (EMA) for lessons injected in a completed run."""
+        changed = False
+        for lid in lesson_ids:
+            if lid not in self._lessons:
+                continue
+            lesson = self._lessons[lid]
+            lesson.injection_count += 1
+            lesson.effectiveness_score = round(
+                0.7 * lesson.effectiveness_score + 0.3 * score, 3
+            )
+            changed = True
+            logger.debug(
+                "[lessons] outcome lesson=%s score=%.2f new_eff=%.3f",
+                lid, score, lesson.effectiveness_score,
+            )
+        if changed:
+            self._save()
 
     def all(self) -> list[Lesson]:
         return sorted(self._lessons.values(), key=lambda l: -l.hit_count)

@@ -73,12 +73,12 @@ async def run_eval_suite(
 ) -> dict:
     """Run full evaluation on all test cases. Returns metrics dict."""
     from storage.vector_store import search
+    from evals.rubric_scorer import score_response
 
     results = []
     for case in test_cases:
         question = case.get("question", "")
         ground_truth = case.get("ground_truth", "")
-        context = case.get("context", "")
         gt_chunk_id = case.get("chunk_id", "")
 
         # Retrieve
@@ -100,7 +100,7 @@ async def run_eval_suite(
             ans_resp = await client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=[
-                    {"role": "system", "content": "根据提供的上下文回答问题，用中文。"},
+                    {"role": "system", "content": "根据提供的上下文回答问题，用简体中文。"},
                     {"role": "user", "content": f"上下文：\n{retrieved_context}\n\n问题：{question}"},
                 ],
                 temperature=0,
@@ -110,23 +110,19 @@ async def run_eval_suite(
         except Exception:
             answer = ""
 
-        # Score
-        faithfulness = await _llm_score(
-            _FAITHFULNESS_PROMPT.format(context=retrieved_context, question=question, answer=answer),
-            client,
-        )
-        relevancy = await _llm_score(
-            _RELEVANCY_PROMPT.format(question=question, answer=answer),
-            client,
-        )
+        # Rubric score (1-5 across 4 dimensions)
+        rubric = await score_response(question, answer, retrieved_context, client)
         p_at_3 = precision_at_k(retrieved_ids, gt_chunk_id, k=3)
 
         results.append({
             "question": question,
             "ground_truth": ground_truth,
             "answer": answer,
-            "faithfulness": round(faithfulness, 3),
-            "answer_relevancy": round(relevancy, 3),
+            "faithfulness": rubric.normalised,
+            "answer_relevancy": rubric.relevancy / 5,
+            "completeness": rubric.completeness / 5,
+            "coherence": rubric.coherence / 5,
+            "rubric": rubric.to_dict(),
             "precision_at_3": p_at_3,
             "retrieval_latency_ms": round(latency_ms, 1),
             "source_title": case.get("source_title", ""),
@@ -135,19 +131,19 @@ async def run_eval_suite(
     if not results:
         return {"metrics": {}, "per_case": [], "timestamp": datetime.now().isoformat()}
 
-    avg_faith = sum(r["faithfulness"] for r in results) / len(results)
-    avg_rel = sum(r["answer_relevancy"] for r in results) / len(results)
-    avg_p3 = sum(r["precision_at_3"] for r in results) / len(results)
-    avg_lat = sum(r["retrieval_latency_ms"] for r in results) / len(results)
+    def avg(key: str) -> float:
+        return round(sum(r[key] for r in results) / len(results), 3)
 
     output = {
         "timestamp": datetime.now().isoformat(),
         "case_count": len(results),
         "metrics": {
-            "faithfulness": round(avg_faith, 3),
-            "answer_relevancy": round(avg_rel, 3),
-            "precision_at_3": round(avg_p3, 3),
-            "avg_retrieval_latency_ms": round(avg_lat, 1),
+            "faithfulness": avg("faithfulness"),
+            "answer_relevancy": avg("answer_relevancy"),
+            "completeness": avg("completeness"),
+            "coherence": avg("coherence"),
+            "precision_at_3": avg("precision_at_3"),
+            "avg_retrieval_latency_ms": round(sum(r["retrieval_latency_ms"] for r in results) / len(results), 1),
         },
         "per_case": results,
     }

@@ -24,18 +24,23 @@ class AgentContextBuilder:
 
     def __init__(self, lesson_store: LessonStore | None = None) -> None:
         self._store = lesson_store
+        self.last_injected_ids: list[str] = []
 
     def build(self, task: str, top_k: int = 3) -> str:
         """
         Return a markdown-formatted system-prompt prefix.
         Empty string when there are no relevant lessons.
+        Also stores last_injected_ids for outcome recording.
         """
+        self.last_injected_ids = []
         if not self._store:
             return ""
 
         lessons = self._store.query(task, top_k=top_k)
         if not lessons:
             return ""
+
+        self.last_injected_ids = [l.id for l in lessons]
 
         lines = [
             "## Harness: known failure modes for this task\n",
