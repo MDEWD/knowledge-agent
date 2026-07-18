@@ -41,7 +41,7 @@ function runForceLayout(
     }
   })
 
-  const k = Math.sqrt((width * height) / (nodes.length + 1)) * 0.75
+  const k = Math.sqrt((width * height) / (nodes.length + 1)) * 1.2
 
   for (let iter = 0; iter < 300; iter++) {
     const damping = 0.85 - (iter / 300) * 0.35
@@ -55,7 +55,10 @@ function runForceLayout(
         const dx = pos[b.id].x - pos[a.id].x
         const dy = pos[b.id].y - pos[a.id].y
         const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1)
-        const force = (k * k) / dist
+        // Minimum distance: video nodes need more room for their labels
+        const minDist = (a.type === 'video' || b.type === 'video') ? 105 : 72
+        let force = (k * k) / dist
+        if (dist < minDist) force += (minDist - dist) * 1.8
         const nx = (force * dx) / dist, ny = (force * dy) / dist
         fx[a.id] -= nx; fy[a.id] -= ny
         fx[b.id] += nx; fy[b.id] += ny
@@ -289,13 +292,15 @@ export default function GraphPanel() {
                   />
                   <text
                     textAnchor="middle"
-                    dy={r + 13}
+                    dy={r + 14}
                     fontSize={isVideo ? 10 : 9}
                     fill={isHovered ? '#fff' : '#9ca3af'}
+                    stroke="#0f172a"
+                    strokeWidth={3}
+                    paintOrder="stroke"
                     className="pointer-events-none select-none"
-                    style={{ maxWidth: 80 }}
                   >
-                    {n.label.length > 12 ? n.label.slice(0, 11) + '…' : n.label}
+                    {n.label.length > 11 ? n.label.slice(0, 10) + '…' : n.label}
                   </text>
                 </g>
               )

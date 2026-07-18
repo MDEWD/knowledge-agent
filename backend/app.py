@@ -23,15 +23,15 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
 from extractors.generic import get_transcript as generic_transcript
 from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
 from processors.insights import extract_insights, parse_category, is_mainly_chinese, translate_to_chinese
-from processors.rag_enhancer import rewrite_query, rerank
+from processors.rag_enhancer import rewrite_query, rerank, expand_queries, classify_intent, rerank_with_significance
 from storage.obsidian import save_to_obsidian, update_obsidian_note
 from storage.vector_store import add_document, add_note_document, delete_document, find_related, search
-from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note
+from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note, batch_update_significance
 from observability.tracer import tracer
 
 
@@ -43,6 +43,11 @@ _scheduler = AsyncIOScheduler()
 def _run_weekly_review() -> None:
     from processors.review import generate_weekly_review
     generate_weekly_review(days=7)
+
+
+def _run_dream_cycle() -> None:
+    from processors.dream_cycle import run_dream_cycle
+    run_dream_cycle()
 
 
 def _sync_bm25_from_chroma() -> None:
@@ -77,6 +82,12 @@ async def lifespan(app: FastAPI):
         _run_weekly_review,
         CronTrigger(day_of_week="mon", hour=9, minute=0),
         id="weekly_review",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _run_dream_cycle,
+        CronTrigger(hour=3, minute=17),
+        id="dream_cycle",
         replace_existing=True,
     )
     _scheduler.start()
@@ -115,6 +126,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    model: str = "deepseek"
 
     def as_dicts(self) -> list[dict]:
         return [m.model_dump() for m in self.messages]
@@ -353,6 +365,39 @@ _CHAT_SYSTEM = """\
 回答用中文。
 """
 
+# ── Content creation de-AI guide ──────────────────────────────────────────────
+# Injected when user intent is detected as content generation (小红书/文章/帖子等)
+
+_WRITING_KEYWORDS = [
+    "小红书", "公众号", "朋友圈", "写一篇", "生成一篇", "帮我写", "创作一篇",
+    "爆款", "帖子", "种草", "文案", "笔记风格", "写篇",
+]
+
+_CONTENT_WRITING_GUIDE = """\
+【内容创作模式】
+用户需要的是读起来像真人写的内容，不是AI报告。严格遵守：
+
+禁止使用（这些词句是AI味的主要来源）：
+- 程序化列举：首先/其次/再次/最后/第一点/第二点
+- 书面套话：综上所述、值得注意的是、不容忽视、总体而言、与此同时、不仅如此
+- 模糊形容：非常重要、效果显著、值得尝试、有一定帮助、具有重要意义
+- 工整并列句：「A不仅…而且…，不仅如此，还…」这类对称结构
+- 每段格式雷同（观点→解释→例子→小结 的模板感）
+
+写出真实感的方法：
+- 句子长短不一，可以有残缺句、感叹句，偶尔用破折号
+- 有强烈主观立场，不要和稀泥，敢说"这个方法根本没用"
+- 用具体数字和细节替代模糊词（"连续用了21天"而非"坚持一段时间后"）
+- 口语词自然插入：说真的、不夸张、老实讲、说白了、其实吧
+- 直接用"你"对话读者
+
+小红书格式要求：
+- 标题：数字+反常识或痛点，制造好奇（不要感叹号堆砌）
+- 首句：直接切入钩子，1-2句，不要铺垫背景
+- 正文：干货优先，短段落（3-4行换段），emoji用于标记重点而非装饰每行
+- 结尾：一个真实问题引导互动，不要"希望对你有帮助~"这类客套收尾
+"""
+
 _TOOLS = [
     {
         "type": "function",
@@ -455,7 +500,14 @@ _TOOL_LABELS: dict[str, str] = {
 _COMPRESS_AT = 14
 
 
-async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[dict]:
+def _get_llm_client(model_id: str) -> tuple[AsyncOpenAI, str]:
+    """Return (client, model_name) for the given model selector value."""
+    if model_id == "qwen":
+        return AsyncOpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL), QWEN_MODEL
+    return AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL), DEEPSEEK_MODEL
+
+
+async def _compress_history(messages: list[dict], client: AsyncOpenAI, model: str) -> list[dict]:
     non_system = [m for m in messages if m["role"] != "system"]
     if len(non_system) <= _COMPRESS_AT:
         return messages
@@ -467,7 +519,7 @@ async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[d
         for m in old if isinstance(m.get("content"), str)
     )
     resp = await client.chat.completions.create(
-        model=DEEPSEEK_MODEL, max_tokens=300,
+        model=model, max_tokens=300,
         messages=[
             {"role": "system", "content": "请用中文简洁总结以下对话的关键信息，100字以内。"},
             {"role": "user", "content": text},
@@ -477,7 +529,7 @@ async def _compress_history(messages: list[dict], client: AsyncOpenAI) -> list[d
     return system_msgs + [{"role": "system", "content": f"【对话历史摘要】{summary}"}] + recent
 
 
-async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | None, list | None]:
+async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, model: str) -> tuple[str, list | None, list | None]:
     """Returns (result_text, youtube_suggestions, citations)."""
     try:
         args = json.loads(arguments)
@@ -486,17 +538,54 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
 
     if name == "search_knowledge_base":
         query = args.get("query", "")
-        async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
-        # Query rewriting — expand synonyms, clarify implicit context
-        rewritten = await rewrite_query(query, async_client, DEEPSEEK_MODEL)
+        # Step 1: Classify intent to route to best retrieval strategy
+        intent = await classify_intent(query, client, model)
 
-        # Retrieve wider candidate set, then rerank for precision
-        candidates = await loop.run_in_executor(None, search, rewritten, 20)
-        results = await loop.run_in_executor(None, rerank, query, candidates, 6)
+        # Temporal queries: sort by recency instead of semantic search
+        if intent == "temporal":
+            from storage.video_db import list_videos as _lv
+            from storage.notes_db import list_notes as _ln
+            all_items = sorted(
+                [{"title": v["title"], "type": "视频", "created_at": v.get("created_at", ""), "url": v.get("url", "")} for v in _lv()] +
+                [{"title": n["title"], "type": "笔记", "created_at": n.get("imported_at", ""), "url": n.get("url", "")} for n in _ln()],
+                key=lambda x: x["created_at"],
+                reverse=True,
+            )[:10]
+            if not all_items:
+                return "知识库中暂无内容。", None, None
+            lines = [f"- [{i['type']}] 《{i['title']}》 {i['created_at'][:10] if i['created_at'] else ''}" for i in all_items]
+            return "最近导入的内容：\n" + "\n".join(lines), None, None
 
-        if not results:
+        # Step 2: Multi-query expansion for conceptual queries
+        if intent == "conceptual":
+            query_variants = await expand_queries(query, client, model)
+        else:
+            # Entity queries: use original + one rewrite, skip expansion
+            query_variants = [query]
+
+        # Step 3: Rewrite primary query, then search all variants, deduplicate via key
+        primary_rewritten = await rewrite_query(query, client, model)
+        all_queries = [primary_rewritten] + query_variants[1:]
+
+        seen_keys: set[str] = set()
+        all_candidates: list[dict] = []
+        for q in all_queries:
+            for c in await loop.run_in_executor(None, search, q, 15):
+                key = f"{c['metadata'].get('url', '')}::{c['metadata'].get('chunk_index', 0)}"
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_candidates.append(c)
+
+        if not all_candidates:
             return "知识库中没有相关内容。", None, None
+
+        # Step 4: Rerank with significance boost
+        from processors.significance import get_significance_map
+        sig_map = await loop.run_in_executor(None, get_significance_map)
+        results = await loop.run_in_executor(
+            None, rerank_with_significance, query, all_candidates, 6, sig_map
+        )
 
         from storage.vector_store import is_topic_covered
         covered = await loop.run_in_executor(None, is_topic_covered, query, 1, 1.0)
@@ -599,7 +688,7 @@ async def _execute_tool(name: str, arguments: str, loop) -> tuple[str, list | No
 
 # ── Reflection helper ─────────────────────────────────────────────────────────
 
-async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
+async def _reflect(question: str, answer: str, client: AsyncOpenAI, model: str) -> dict:
     """
     Check whether the agent's answer fully addresses the question.
     Returns {"needs_more": bool, "gap": "description of missing info"}.
@@ -614,7 +703,7 @@ async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
     )
     try:
         resp = await client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=80,
@@ -629,18 +718,29 @@ async def _reflect(question: str, answer: str, client: AsyncOpenAI) -> dict:
 
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
-    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    async_client, active_model = _get_llm_client(req.model)
 
     async def generate() -> AsyncGenerator[str, None]:
         from processors.long_memory import get_memory_context, update_memory_from_conversation
         memory_ctx = get_memory_context()
-        system_content = _CHAT_SYSTEM + ("\n\n" + memory_ctx if memory_ctx else "")
+        from processors.purpose_manager import get_purpose_context
+        purpose_ctx = get_purpose_context()
+
+        last_user_msg = req.messages[-1].content if req.messages else ""
+        writing_ctx = _CONTENT_WRITING_GUIDE if any(kw in last_user_msg for kw in _WRITING_KEYWORDS) else ""
+
+        system_content = (
+            _CHAT_SYSTEM
+            + ("\n\n" + purpose_ctx if purpose_ctx else "")
+            + ("\n\n" + memory_ctx if memory_ctx else "")
+            + ("\n\n" + writing_ctx if writing_ctx else "")
+        )
 
         messages: list[dict] = [
             {"role": "system", "content": system_content},
             *req.as_dicts(),
         ]
-        messages = await _compress_history(messages, async_client)
+        messages = await _compress_history(messages, async_client, active_model)
         loop = asyncio.get_event_loop()
         turn_citations: list[dict] = []
         accumulated_answer = ""
@@ -657,12 +757,12 @@ async def chat_stream(req: ChatRequest):
             # Span for this LLM call
             gen_span = tracer.generation(
                 trace, f"llm-iter-{iteration}",
-                model=DEEPSEEK_MODEL,
+                model=active_model,
                 input_text=json.dumps(messages[-3:], ensure_ascii=False)[:1500],
             )
 
             stream = await async_client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
+                model=active_model,
                 max_tokens=2048,
                 messages=messages,
                 tools=_TOOLS,
@@ -714,7 +814,7 @@ async def chat_stream(req: ChatRequest):
 
                 # Span for this tool call
                 tool_span = tracer.span(trace, f"tool:{tool_name}", input_data=tc["function"]["arguments"][:500])
-                result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop)
+                result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop, async_client, active_model)
                 tracer.end_span(tool_span, output=result_str[:500])
 
                 if citations:
@@ -735,7 +835,7 @@ async def chat_stream(req: ChatRequest):
 
         # ── Reflection pass ────────────────────────────────────────────────
         if accumulated_answer and original_question:
-            reflection = await _reflect(original_question, accumulated_answer, async_client)
+            reflection = await _reflect(original_question, accumulated_answer, async_client, active_model)
             if reflection.get("needs_more"):
                 gap = reflection.get("gap", "")
                 yield f"data: {json.dumps({'type': 'reflection', 'gap': gap}, ensure_ascii=False)}\n\n"
@@ -745,7 +845,7 @@ async def chat_stream(req: ChatRequest):
                 if supp_results:
                     supp_context = "\n\n".join(r["content"] for r in supp_results)
                     supp_stream = await async_client.chat.completions.create(
-                        model=DEEPSEEK_MODEL,
+                        model=active_model,
                         messages=[
                             {"role": "system", "content": "根据补充信息，用1-3句话简短补充原回答中遗漏的部分。"},
                             {"role": "user", "content": (
@@ -1058,6 +1158,78 @@ async def rebuild_graph():
     return await loop.run_in_executor(None, build_graph, True)
 
 
+@app.get("/api/graph/gaps")
+async def get_graph_gaps():
+    loop = asyncio.get_event_loop()
+    from processors.knowledge_graph import analyze_gaps
+    return await loop.run_in_executor(None, analyze_gaps)
+
+
+class GapResearchRequest(BaseModel):
+    query: str
+    gap_title: str = ""
+
+
+@app.post("/api/graph/research-gap")
+async def research_gap(req: GapResearchRequest):
+    """Search internal knowledge base for a detected gap and return relevant results."""
+    loop = asyncio.get_event_loop()
+    from storage.vector_store import search
+    from processors.rag_enhancer import rerank
+    candidates = await loop.run_in_executor(None, search, req.query, 10)
+    ranked = await loop.run_in_executor(None, rerank, req.query, candidates, 5)
+    if not ranked:
+        return {"found": False, "gap_title": req.gap_title, "query": req.query, "results": []}
+    return {
+        "found": True,
+        "gap_title": req.gap_title,
+        "query": req.query,
+        "results": [
+            {
+                "title": r["metadata"].get("title", ""),
+                "content": r["content"][:300],
+                "url": r["metadata"].get("url", ""),
+            }
+            for r in ranked
+        ],
+    }
+
+
+class PurposeRequest(BaseModel):
+    content: str
+
+
+@app.get("/api/purpose")
+async def get_purpose():
+    from processors.purpose_manager import read_purpose, get_default_template
+    content = read_purpose()
+    return {"content": content, "template": get_default_template() if not content else ""}
+
+
+@app.post("/api/purpose")
+async def set_purpose(req: PurposeRequest):
+    from processors.purpose_manager import write_purpose
+    write_purpose(req.content)
+    return {"ok": True}
+
+
+# ── Dream Cycle endpoints ─────────────────────────────────────────────────────
+
+@app.get("/api/dream-cycle/report")
+async def dream_cycle_report():
+    from processors.dream_cycle import load_last_report
+    report = load_last_report()
+    if not report:
+        return {"status": "no_report", "message": "Dream Cycle 尚未运行"}
+    return report
+
+
+@app.post("/api/dream-cycle/run")
+async def dream_cycle_run(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_dream_cycle)
+    return {"status": "started", "message": "Dream Cycle 已在后台启动"}
+
+
 # ── Long-term Memory endpoints ────────────────────────────────────────────────
 
 class MemoryUpdateRequest(BaseModel):
@@ -1198,8 +1370,16 @@ async def agent_run(req: AgentRunRequest):
         # Retrieve relevant skills from the library and surface them to user
         store = _get_skill_store()
         relevant_skills = store.search(req.task, top_k=3)
+        injected_skill_ids = [s.skill_id for s in relevant_skills]
         if relevant_skills:
             yield f"data: {json.dumps({'type': 'skills', 'skills': [{'name': s.name, 'description': s.description} for s in relevant_skills]}, ensure_ascii=False)}\n\n"
+
+        # Inject lessons from lesson store into task context
+        from harness.lessons import LessonStore
+        from harness.context import AgentContextBuilder
+        lesson_store = LessonStore(DATA_PATH / "harness_lessons.json")
+        context_builder = AgentContextBuilder(lesson_store)
+        lesson_context = context_builder.build(req.task)
 
         harness = AgentHarness(
             guardrails=Guardrails(),
@@ -1222,6 +1402,9 @@ async def agent_run(req: AgentRunRequest):
         trace = tracer.trace("orchestrator", metadata={"task": req.task[:200]})
         transcript_parts: list[str] = []
         final_output = ""
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_tool_calls = 0
 
         try:
             # Pre-check input via guardrails
@@ -1231,21 +1414,38 @@ async def agent_run(req: AgentRunRequest):
                 req.task,
                 run_id=run_id,
                 confirm_event=confirm_event,
+                lesson_context=lesson_context,
             ):
                 # Track transcript for skill extraction
                 if event.get("type") == "text":
                     transcript_parts.append(event.get("content", ""))
                     final_output += event.get("content", "")
-                elif event.get("type") in ("agent_done", "plan"):
+                elif event.get("type") == "plan":
                     transcript_parts.append(json.dumps(event, ensure_ascii=False))
+                elif event.get("type") == "agent_done":
+                    transcript_parts.append(json.dumps(event, ensure_ascii=False))
+                    u = event.get("usage") or {}
+                    total_input_tokens += u.get("input_tokens", 0)
+                    total_output_tokens += u.get("output_tokens", 0)
+                    total_tool_calls += u.get("tool_calls", 0)
 
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             # Record circuit success
             _get_harness_circuit().record_success()
 
-            # Emit harness telemetry to frontend
-            yield f"data: {json.dumps({'type': 'harness', 'budget': harness.budget.summary()}, ensure_ascii=False)}\n\n"
+            # Emit harness telemetry to frontend with real accumulated usage
+            real_budget = {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "tool_calls": total_tool_calls,
+                "limits": {
+                    "max_input_tokens": 80_000,
+                    "max_output_tokens": 20_000,
+                    "max_tool_calls": 30,
+                },
+            }
+            yield f"data: {json.dumps({'type': 'harness', 'budget': real_budget}, ensure_ascii=False)}\n\n"
 
             # Background skill extraction (non-blocking)
             transcript = "\n".join(transcript_parts)
@@ -1255,6 +1455,15 @@ async def agent_run(req: AgentRunRequest):
                 store.save(skill)
             if new_skills:
                 yield f"data: {json.dumps({'type': 'skill_learned', 'count': len(new_skills), 'names': [s.name for s in new_skills]}, ensure_ascii=False)}\n\n"
+
+            # Feedback loop: score output and update effectiveness on injected lessons/skills
+            if final_output and (injected_skill_ids or context_builder.last_injected_ids):
+                from evals.rubric_scorer import score_response
+                rubric = await score_response(req.task, final_output[:1500], "", async_client)
+                if context_builder.last_injected_ids:
+                    lesson_store.record_outcome(context_builder.last_injected_ids, rubric.normalised)
+                if injected_skill_ids:
+                    store.record_outcome(injected_skill_ids, rubric.normalised)
 
         except Exception as exc:
             _get_harness_circuit().record_failure()
@@ -1338,6 +1547,33 @@ async def evals_results():
     path = DATA_PATH / "eval_results.json"
     if not path.exists():
         return {"metrics": {}, "per_case": [], "timestamp": None}
+    return _json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.post("/api/evals/agent/run")
+async def evals_agent_run():
+    """
+    Run the full agent evaluation suite:
+      - Tool Use: intent classification accuracy
+      - Reflection: quality gain from self-critique
+      - Task Success Rate: SIMPLE / MEDIUM / HARD (VitaBench-inspired)
+      - Multi-agent Synergy: single vs multi-agent output quality
+      - Multi-turn Stability: conversation degradation over 6 turns
+    """
+    async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    from evals.eval_agent_tasks import run_agent_eval
+    result = await run_agent_eval(async_client)
+    return result
+
+
+@app.get("/api/evals/agent/results")
+async def evals_agent_results():
+    """Return cached agent eval results."""
+    from config import DATA_PATH
+    import json as _json
+    path = DATA_PATH / "eval_agent_results.json"
+    if not path.exists():
+        return {"summary": {}, "timestamp": None}
     return _json.loads(path.read_text(encoding="utf-8"))
 
 

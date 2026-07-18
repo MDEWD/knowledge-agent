@@ -123,3 +123,107 @@ def build_graph(force_rebuild: bool = False) -> dict:
                 edges.append({"source": f"v_{a}", "target": f"v_{b}", "type": "related"})
 
     return {"nodes": nodes, "edges": edges}
+
+
+def analyze_gaps(graph_data: dict | None = None) -> dict:
+    """
+    Detect knowledge gaps in the graph:
+    - Isolated nodes: videos with ≤ 1 connection (poorly integrated knowledge)
+    - Unexpected connections: cross-category video-to-video edges (potential insights)
+    - Missing topics: LLM-identified gaps based on overall content
+    """
+    if graph_data is None:
+        graph_data = build_graph()
+
+    nodes = graph_data.get("nodes", [])
+    edges = graph_data.get("edges", [])
+
+    if not nodes:
+        return {
+            "isolated": [], "unexpected": [], "gaps": [],
+            "stats": {"total_nodes": 0, "total_edges": 0, "isolated_count": 0, "cross_category_connections": 0},
+        }
+
+    degree: dict[str, int] = {n["id"]: 0 for n in nodes}
+    for e in edges:
+        degree[e["source"]] = degree.get(e["source"], 0) + 1
+        degree[e["target"]] = degree.get(e["target"], 0) + 1
+
+    isolated = [
+        {
+            "id": n["id"], "title": n["label"],
+            "category": n.get("category", "其他"), "degree": degree.get(n["id"], 0),
+        }
+        for n in nodes
+        if n["type"] == "video" and degree.get(n["id"], 0) <= 1
+    ]
+
+    video_category = {n["id"]: n.get("category", "其他") for n in nodes if n["type"] == "video"}
+    video_label = {n["id"]: n["label"] for n in nodes}
+    unexpected = []
+    for e in edges:
+        src, tgt = e["source"], e["target"]
+        if src in video_category and tgt in video_category and video_category[src] != video_category[tgt]:
+            unexpected.append({
+                "source": {"id": src, "title": video_label.get(src, src), "category": video_category[src]},
+                "target": {"id": tgt, "title": video_label.get(tgt, tgt), "category": video_category[tgt]},
+            })
+
+    gaps = _identify_knowledge_gaps(nodes, isolated, unexpected)
+
+    return {
+        "isolated": isolated[:10],
+        "unexpected": unexpected[:10],
+        "gaps": gaps,
+        "stats": {
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "isolated_count": len(isolated),
+            "cross_category_connections": len(unexpected),
+        },
+    }
+
+
+def _identify_knowledge_gaps(nodes: list[dict], isolated: list[dict], unexpected: list[dict]) -> list[dict]:
+    video_nodes = [n for n in nodes if n["type"] == "video"]
+    if not video_nodes:
+        return []
+
+    titles_summary = "\n".join(
+        f"- {n['label']} ({n.get('category', '其他')})" for n in video_nodes[:30]
+    )
+    isolated_summary = "\n".join(f"- {i['title']}" for i in isolated[:5]) or "无"
+    unexpected_summary = (
+        "\n".join(
+            f"- {u['source']['title']} ({u['source']['category']}) ←→ "
+            f"{u['target']['title']} ({u['target']['category']})"
+            for u in unexpected[:5]
+        )
+        or "无"
+    )
+
+    prompt = (
+        "你是一个知识图谱分析专家。根据以下知识库内容，识别知识空白并生成研究建议。\n\n"
+        f"知识库内容：\n{titles_summary}\n\n"
+        f"孤立节点（关联较少）：\n{isolated_summary}\n\n"
+        f"跨类别意外关联：\n{unexpected_summary}\n\n"
+        "请输出严格 JSON 数组（最多5条，不要 markdown 代码块）：\n"
+        '[{"gap_type":"isolated"或"unexpected"或"missing",'
+        '"title":"空白主题名称","description":"为什么这是知识空白",'
+        '"research_query":"用于进一步研究的具体问题","priority":"high"或"medium"或"low"}]'
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            max_tokens=800,
+            messages=[
+                {"role": "system", "content": "只输出JSON数组，不要任何解释。"},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = resp.choices[0].message.content or "[]"
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        return json.loads(match.group()) if match else []
+    except Exception:
+        return []

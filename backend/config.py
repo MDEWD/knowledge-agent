@@ -5,6 +5,10 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
+QWEN_API_KEY = os.environ.get("QWEN_API_KEY", "")
+QWEN_BASE_URL = os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen-plus")
+
 OBSIDIAN_VAULT_PATH = Path(
     os.environ.get("OBSIDIAN_VAULT", str(Path.home() / "obsidian-vault" / "Videos"))
 )

@@ -129,9 +129,12 @@ export interface EvalCase {
   answer: string
   faithfulness: number
   answer_relevancy: number
+  completeness: number
+  coherence: number
   precision_at_3: number
   retrieval_latency_ms: number
   source_title: string
+  rubric?: { faithfulness: number; relevancy: number; completeness: number; coherence: number; mean: number }
 }
 
 export interface EvalResult {
@@ -140,6 +143,8 @@ export interface EvalResult {
   metrics: {
     faithfulness?: number
     answer_relevancy?: number
+    completeness?: number
+    coherence?: number
     precision_at_3?: number
     avg_retrieval_latency_ms?: number
   }

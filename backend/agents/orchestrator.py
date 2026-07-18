@@ -156,6 +156,7 @@ class OrchestratorAgent:
         *,
         run_id: str | None = None,
         confirm_event: asyncio.Event | None = None,
+        lesson_context: str = "",
     ) -> AsyncGenerator[dict, None]:
         """
         Stream orchestration events:
@@ -165,14 +166,16 @@ class OrchestratorAgent:
           agent_start(Writing) → text chunks → agent_done(Writing) → done
         """
         run_id = run_id or str(uuid.uuid4())
+        # Prepend harness lessons to task so all sub-agents benefit
+        enriched_task = f"{lesson_context}\n\n{task}".strip() if lesson_context else task
 
         # ── Try to resume ──────────────────────────────────────────────────────
         saved = self._load_checkpoint(run_id)
         resuming_from_step = int(saved.get("step", 0)) if saved else 0
 
         # ── Phase 1: Plan ──────────────────────────────────────────────────────
-        plan = await self._plan(task)
-        research_task = plan.get("research_task", task)
+        plan = await self._plan(enriched_task)
+        research_task = plan.get("research_task", enriched_task)
         analysis_task = plan.get("analysis_task", task)
 
         plan_steps = [
@@ -241,6 +244,7 @@ class OrchestratorAgent:
                             "type": "agent_done", "agent": "ResearchAgent",
                             "summary": research_result[:300] + ("…" if len(research_result) > 300 else ""),
                             "stop_reason": event.get("stop_reason") or "自然结束",
+                            "usage": event.get("usage"),
                         }
                     else:
                         yield event
@@ -267,6 +271,7 @@ class OrchestratorAgent:
                         "type": "agent_done", "agent": "AnalysisAgent",
                         "summary": analysis_result[:300] + ("…" if len(analysis_result) > 300 else ""),
                         "stop_reason": event.get("stop_reason") or "自然结束",
+                        "usage": event.get("usage"),
                     }
 
                 elif (event["type"] == "sub_agent_tool"
@@ -318,19 +323,26 @@ class OrchestratorAgent:
             messages=messages,
             temperature=0.5,
             stream=True,
+            stream_options={"include_usage": True},
         )
         full_text = ""
+        writing_input_tokens = 0
+        writing_output_tokens = 0
         async for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
             if delta:
                 full_text += delta
                 yield {"type": "text", "content": delta}
+            if chunk.usage:
+                writing_input_tokens = chunk.usage.prompt_tokens or 0
+                writing_output_tokens = chunk.usage.completion_tokens or 0
 
         yield {
             "type": "agent_done",
             "agent": "WritingAgent",
             "summary": full_text[:300] + ("…" if len(full_text) > 300 else ""),
             "stop_reason": "报告撰写完成",
+            "usage": {"input_tokens": writing_input_tokens, "output_tokens": writing_output_tokens, "tool_calls": 0},
         }
 
         self._delete_checkpoint(run_id)

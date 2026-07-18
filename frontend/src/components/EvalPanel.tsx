@@ -92,21 +92,11 @@ export default function EvalPanel() {
 
       {/* Metrics */}
       <div className="grid grid-cols-3 gap-3 mb-4">
-        <MetricCard
-          label="Faithfulness"
-          value={metrics.faithfulness ?? null}
-          desc="回答忠实于上下文"
-        />
-        <MetricCard
-          label="Answer Relevancy"
-          value={metrics.answer_relevancy ?? null}
-          desc="回答切题程度"
-        />
-        <MetricCard
-          label="Precision@3"
-          value={metrics.precision_at_3 ?? null}
-          desc="检索命中率"
-        />
+        <MetricCard label="忠实度" value={metrics.faithfulness ?? null} desc="回答忠实于上下文" />
+        <MetricCard label="相关性" value={metrics.answer_relevancy ?? null} desc="回答切题程度" />
+        <MetricCard label="完整性" value={metrics.completeness ?? null} desc="覆盖问题所有要点" />
+        <MetricCard label="连贯性" value={metrics.coherence ?? null} desc="逻辑链条清晰度" />
+        <MetricCard label="Precision@3" value={metrics.precision_at_3 ?? null} desc="检索命中率" />
       </div>
 
       {metrics.avg_retrieval_latency_ms && (
@@ -132,6 +122,8 @@ export default function EvalPanel() {
                   {[
                     { val: c.faithfulness, label: 'F' },
                     { val: c.answer_relevancy, label: 'R' },
+                    { val: c.completeness, label: 'C' },
+                    { val: c.coherence, label: 'L' },
                     { val: c.precision_at_3, label: 'P' },
                   ].map(({ val, label }) => (
                     <span
@@ -150,6 +142,15 @@ export default function EvalPanel() {
               {expanded === i && (
                 <div className="px-4 pb-3 border-t border-gray-700 space-y-2 pt-2">
                   <p className="text-[10px] text-gray-500">来源：{c.source_title}</p>
+                  {c.rubric && (
+                    <div className="flex gap-3 text-[10px] text-gray-500">
+                      <span>忠实度 <b className="text-gray-300">{c.rubric.faithfulness}/5</b></span>
+                      <span>相关性 <b className="text-gray-300">{c.rubric.relevancy}/5</b></span>
+                      <span>完整性 <b className="text-gray-300">{c.rubric.completeness}/5</b></span>
+                      <span>连贯性 <b className="text-gray-300">{c.rubric.coherence}/5</b></span>
+                      <span>均分 <b className="text-gray-300">{c.rubric.mean.toFixed(1)}</b></span>
+                    </div>
+                  )}
                   <div>
                     <p className="text-[10px] text-gray-600 mb-0.5">RAG 生成答案：</p>
                     <p className="text-xs text-gray-400 leading-relaxed">{c.answer}</p>
