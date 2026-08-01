@@ -151,6 +151,82 @@ html.light .text-cyan-200\/70  { color: #155e75 !important; }
 html.light .text-cyan-300\/40  { color: #0e7490 !important; }
 html.light .bg-cyan-800\/50    { background-color: #0891b2 !important; }
 
+/* DeepResearch follow-up input keeps sufficient contrast in light mode. */
+html.light .deep-followup-input {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  caret-color: #0891b2;
+}
+html.light .deep-followup-input::placeholder {
+  color: #6b7280 !important;
+  opacity: 1;
+}
+
+.deep-research-composer {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(17, 31, 48, 0.94));
+  border-color: rgba(71, 85, 105, 0.72);
+  box-shadow:
+    0 -10px 32px rgba(2, 8, 23, 0.18),
+    0 8px 24px rgba(2, 8, 23, 0.16);
+  backdrop-filter: blur(18px);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.deep-research-composer:focus-within {
+  border-color: rgba(34, 211, 238, 0.7);
+  box-shadow:
+    0 -10px 32px rgba(2, 8, 23, 0.18),
+    0 0 0 3px rgba(34, 211, 238, 0.09);
+}
+.deep-composer-new {
+  background-color: rgba(51, 65, 85, 0.52);
+}
+.deep-composer-new:hover {
+  background-color: rgba(51, 65, 85, 0.82);
+}
+.deep-composer-send {
+  background: linear-gradient(135deg, #06b6d4, #2563eb);
+  box-shadow: 0 6px 16px rgba(6, 182, 212, 0.28);
+}
+.deep-composer-send:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.34);
+}
+.deep-followup-input {
+  border: 0 !important;
+  background: transparent !important;
+  caret-color: #22d3ee;
+}
+.deep-followup-input::placeholder {
+  color: #64748b;
+}
+html.light .deep-research-composer {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.97));
+  border-color: rgba(148, 163, 184, 0.55);
+  box-shadow:
+    0 -10px 32px rgba(15, 23, 42, 0.08),
+    0 8px 24px rgba(15, 23, 42, 0.08);
+}
+html.light .deep-research-composer:focus-within {
+  border-color: rgba(8, 145, 178, 0.62);
+  box-shadow:
+    0 -10px 32px rgba(15, 23, 42, 0.08),
+    0 0 0 3px rgba(8, 145, 178, 0.09);
+}
+html.light .deep-composer-new {
+  background-color: rgba(226, 232, 240, 0.72);
+  color: #64748b;
+}
+html.light .deep-composer-new:hover {
+  background-color: rgba(203, 213, 225, 0.86);
+  color: #0e7490;
+}
+html.light .deep-followup-input {
+  color: #0f172a !important;
+}
+html.light .deep-followup-input::placeholder {
+  color: #94a3b8 !important;
+}
+
 /* Yellow / warning */
 html.light .bg-yellow-900\/30          { background-color: #fef9c3 !important; }
 html.light .border-yellow-700          { border-color: #f59e0b !important; }

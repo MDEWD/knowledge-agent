@@ -17,7 +17,7 @@ const MODELS = [
 const WELCOME: ChatMessage = {
   id: '0',
   role: 'assistant',
-  content: '你好！我是你的知识库助手，支持多种工具来帮你探索知识库。你可以问我：\n\n- 最近学了哪些视频？\n- 对比几个视频的核心观点\n- 某分类下有哪些内容？\n- 帮我生成一篇关于「XX主题」的综合文章',
+  content: '你好！我是你的知识库助手，支持多种工具来帮你探索知识库。你可以问我：\n\n- 最近学了哪些视频？\n- 对比几个视频的核心观点\n- 某分类下有哪些内容？\n- 根据知识库内容回答一个具体问题',
 }
 
 function loadMessages(): ChatMessage[] {

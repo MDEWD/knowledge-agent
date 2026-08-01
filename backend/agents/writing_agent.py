@@ -8,7 +8,7 @@ from agents.base_agent import BaseAgent
 
 class WritingAgent(BaseAgent):
     name = "WritingAgent"
-    description = "将研究与分析结果撰写成结构化报告、综合文章"
+    description = "将研究与分析结果撰写成结构化报告"
 
     system_prompt = """\
 你是一位专业的知识内容写作专家。你会接收到来自研究员和分析师的原始素材，将其整合成一篇高质量的综合报告。

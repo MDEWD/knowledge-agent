@@ -1,26 +1,44 @@
 import hashlib
+import logging
 import re
+import threading
 from typing import Optional
 
 import chromadb
 from chromadb.utils import embedding_functions
 
-from config import CHROMA_DB_PATH, EMBED_MODEL
+from config import CHROMA_DB_PATH, EMBED_LOCAL_FILES_ONLY, EMBED_MODEL
 from storage import bm25_store
 
+logger = logging.getLogger(__name__)
+
 _collection: Optional[chromadb.Collection] = None
+_client = None
+_embedding_function = None
+_init_lock = threading.Lock()
 
 
 def _get_collection() -> chromadb.Collection:
-    global _collection
+    global _client, _collection, _embedding_function
     if _collection is None:
-        client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=EMBED_MODEL
-        )
-        _collection = client.get_or_create_collection(
-            "knowledge_base", embedding_function=ef
-        )
+        with _init_lock:
+            if _collection is None:
+                # On Windows, initialize Chroma's Rust runtime before loading
+                # PyTorch/SentenceTransformer to avoid a native DLL access
+                # violation. Cache each completed stage so a later retry does
+                # not register a second client for the same persistence path.
+                if _client is None:
+                    _client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
+                if _embedding_function is None:
+                    _embedding_function = (
+                        embedding_functions.SentenceTransformerEmbeddingFunction(
+                        model_name=EMBED_MODEL,
+                        local_files_only=EMBED_LOCAL_FILES_ONLY,
+                        )
+                    )
+                _collection = _client.get_or_create_collection(
+                    "knowledge_base", embedding_function=_embedding_function
+                )
     return _collection
 
 
@@ -157,17 +175,19 @@ def _rrf_fuse(
 
 
 def search(query: str, n_results: int = 6) -> list[dict]:
-    col = _get_collection()
     candidate_n = min(n_results * 3, 20)
 
     # Dense (semantic) search
     dense_items: list[dict] = []
     try:
+        col = _get_collection()
         results = col.query(query_texts=[query], n_results=candidate_n)
         for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
             dense_items.append({"content": doc, "metadata": meta})
-    except Exception:
-        pass
+    except Exception as exc:
+        # Dense retrieval is optional for reads. Keep research available via
+        # BM25 when Chroma or the local embedding model is temporarily down.
+        logger.warning("Dense search unavailable; falling back to BM25: %s", exc)
 
     # Sparse (BM25) search
     sparse_items: list[dict] = []

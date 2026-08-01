@@ -58,7 +58,7 @@
 ### 其他能力
 - **主动回忆（Spaced Repetition）**：SM-2 算法生成复习卡片
 - **长期记忆**：跨会话用户兴趣与知识空白画像
-- **综合文章生成**：跨视频主题文章自动撰写
+- **深度研究**：多 Agent 检索、对抗校验、断点恢复与报告导出
 - **RAG 评测体系**：LLM-as-Judge 自动生成测试集，评测 Faithfulness / Answer Relevancy / Precision@3
 - **统计面板**：视频数量、内容时长、分类分布、高频标签、周趋势
 
@@ -223,7 +223,17 @@ cp .env.example .env   # 编辑填入 Key
 ```env
 DEEPSEEK_API_KEY=your_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_DRAFT_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_SUPERVISOR_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RESEARCHER_MAIN_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RESEARCHER_SUMMARIZER_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RESEARCHER_COMPRESSOR_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RED_TEAM_MODEL=deepseek-v4-pro
+DEEP_RESEARCH_EVALUATOR_MODEL=deepseek-v4-pro
+DEEP_RESEARCH_WRITER_MODEL=deepseek-v4-pro
+DEEP_RESEARCH_LLM_TIMEOUT_SECONDS=120
+DEEP_RESEARCH_MAX_ITERATIONS=15
 OBSIDIAN_VAULT=/path/to/vault/Videos
 
 # 可选：通义千问（用于模型切换）
@@ -239,6 +249,21 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ```bash
 python app.py
 # http://localhost:8000
+```
+
+DeepResearch 现在使用 LangGraph 类型化状态图运行。每次运行以 `run_id` 作为
+checkpoint `thread_id`，节点状态持久化到 `backend/data/deep_research_checkpoints.sqlite`；
+使用相同 `run_id` 重试会从未完成节点继续。研究资料被保存为结构化 Evidence，最终
+报告拆分为 Claim/Citation 后校验，未出现在本次证据集中的链接会被移除。
+
+运行期间会按角色和工具记录真实 token、调用次数及费用。费用计算需要在 `.env` 中
+填写对应模型的 `*_PER_MILLION_USD`，保持为 `0` 时只统计 token、不虚构供应商价格。
+可调用 `POST /api/agent/deep-run/{run_id}/cancel` 主动取消；浏览器断开连接也会取消正在
+等待的模型请求。完整质量门禁可运行：
+
+```bash
+cd backend
+.venv/Scripts/python -m pytest -q
 ```
 
 ### 2. 前端
@@ -322,6 +347,28 @@ AgentHarness（Harness Engineering）
 ```
 
 ## 常见问题
+
+### 中国公募基金 Deep Research 配置
+
+项目内置 `cn-fund-research` 文件型 Agent Skill。基金或 ETF 任务使用 Tavily 搜索基金公司、
+交易所、监管机构、指数公司和定期报告等公开资料，并经过 Evidence 与 Red Team 口径校验。
+不再调用需要付费 Token 的金融数据接口。请在 `backend/.env` 配置：
+
+```env
+CN_FUND_ENABLE_WEB_SEARCH=true
+CN_FUND_ANNUAL_RISK_FREE_RATE=0.015
+CN_FUND_DEFAULT_BENCHMARK=
+
+TAVILY_API_KEY=你的_Tavily_API_Key
+TAVILY_BASE_URL=https://api.tavily.com
+```
+
+`CN_FUND_DEFAULT_BENCHMARK` 建议留空，由产品官方披露、研究计划或用户明确指定。
+公开网页没有完整、同口径、可按日期对齐的历史序列时，报告会明确披露数据不足，
+不会通过模型心算生成收益、回撤或风险指标。
+
+修改 `.env` 后重启 FastAPI。可用“研究 510300 最近三年，对比沪深300，区分场内价格、
+净值与复权口径，并列出来源页面、数据口径和截止日期”进行验证。
 
 **Q: Bilibili 视频没有字幕？**  
 A: 自动降级 Whisper，CPU 跑完整视频需几分钟，属正常。`WHISPER_MODEL=tiny` 可加速。

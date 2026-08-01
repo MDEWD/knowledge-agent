@@ -16,14 +16,31 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
 
-load_dotenv()
+load_dotenv(override=True)
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
+from config import (
+    DATA_PATH,
+    DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
+    DEEP_RESEARCH_MAX_COST_USD,
+    DEEP_RESEARCH_MAX_INPUT_TOKENS,
+    DEEP_RESEARCH_MAX_OUTPUT_TOKENS,
+    DEEP_RESEARCH_MAX_TOOL_CALLS,
+    DEEP_RESEARCH_FLASH_INPUT_PER_MILLION_USD,
+    DEEP_RESEARCH_FLASH_OUTPUT_PER_MILLION_USD,
+    DEEP_RESEARCH_PRO_INPUT_PER_MILLION_USD,
+    DEEP_RESEARCH_PRO_OUTPUT_PER_MILLION_USD,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL,
+    QWEN_API_KEY,
+    QWEN_BASE_URL,
+    QWEN_MODEL,
+)
 from extractors.generic import get_transcript as generic_transcript
 from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
@@ -142,10 +159,6 @@ class ReviewChatRequest(BaseModel):
 
     def as_dicts(self) -> list[dict]:
         return [m.model_dump() for m in self.messages]
-
-
-class ArticleRequest(BaseModel):
-    topic: str
 
 
 class ReviewRequest(BaseModel):
@@ -354,7 +367,6 @@ _CHAT_SYSTEM = """\
 - 用户问某分类的总结时，用 summarize_category
 - 用户让你对比几个视频时，先用 list_videos_in_kb 找到 ID，再用 compare_videos
 - 知识库中没有相关内容时，用 search_youtube_videos 搜索推荐
-- 用户要求生成综合文章时，用 generate_synthesis_article
 
 引用规则（重要）：
 - search_knowledge_base 返回的每段内容前有 [来源N] 编号
@@ -473,18 +485,6 @@ _TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_synthesis_article",
-            "description": "基于知识库中的相关内容，生成一篇系统性综合文章并保存到Obsidian",
-            "parameters": {
-                "type": "object",
-                "properties": {"topic": {"type": "string", "description": "文章主题"}},
-                "required": ["topic"],
-            },
-        },
-    },
 ]
 
 _TOOL_LABELS: dict[str, str] = {
@@ -494,7 +494,6 @@ _TOOL_LABELS: dict[str, str] = {
     "summarize_category": "汇总分类",
     "compare_videos": "对比视频",
     "search_youtube_videos": "搜索 YouTube",
-    "generate_synthesis_article": "生成综合文章",
 }
 
 _COMPRESS_AT = 14
@@ -672,16 +671,6 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
             return "未找到相关视频", None, None
         lines = [f"- {v['title']} | {v['url']} | 频道:{v['channel']}" for v in videos]
         return "\n".join(lines), videos, None
-
-    if name == "generate_synthesis_article":
-        from processors.article import generate_article
-        result = await loop.run_in_executor(None, generate_article, args.get("topic", ""))
-        if result.get("error"):
-            return result["error"], None, None
-        return (
-            f"文章已生成并保存到 Obsidian（{result.get('source_count', 0)} 个来源）。\n\n"
-            f"文章预览：\n\n{result.get('article', '')[:600]}…"
-        ), None, None
 
     return "未知工具", None, None
 
@@ -874,23 +863,7 @@ async def chat_stream(req: ChatRequest):
     )
 
 
-# ── Article & Review endpoints ────────────────────────────────────────────────
-
-@app.post("/api/generate-article")
-async def generate_article_endpoint(req: ArticleRequest):
-    loop = asyncio.get_event_loop()
-    from processors.article import generate_article
-    result = await loop.run_in_executor(None, generate_article, req.topic)
-    if result.get("error"):
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
-
-
-@app.get("/api/articles")
-async def get_articles():
-    from processors.article import list_articles
-    return list_articles()
-
+# ── Review endpoints ─────────────────────────────────────────────────────────
 
 @app.post("/api/review/generate")
 async def generate_review(req: ReviewRequest):
@@ -1364,7 +1337,8 @@ async def agent_run(req: AgentRunRequest):
 
     async def generate() -> AsyncGenerator[str, None]:
         from agents.orchestrator import OrchestratorAgent
-        from harness import AgentHarness, RetryPolicy, TokenBudget, Guardrails
+        from harness import RetryPolicy, Guardrails
+        from agents.deep_research.budget import ModelPrice, ResearchBudget
         from skills import SkillExtractor
 
         # Retrieve relevant skills from the library and surface them to user
@@ -1490,6 +1464,213 @@ async def agent_confirm(run_id: str):
     return {"ok": True}
 
 
+# ── Deep Research (融合 DeepResearch 项目的自进化+对抗降噪循环) ────────────────
+
+class DeepConversationTurn(BaseModel):
+    question: str
+    answer: str
+
+
+class DeepRunRequest(BaseModel):
+    task: str
+    run_id: str | None = None  # supply to resume a previous run
+    history: list[DeepConversationTurn] = Field(default_factory=list)
+
+
+class DeepExportRequest(BaseModel):
+    title: str = Field(default="Deep Research", max_length=200)
+    content: str = Field(min_length=1)
+    format: str = Field(pattern="^(md|pdf)$")
+
+
+_deep_cancel_events: dict[str, asyncio.Event] = {}
+
+
+@app.post("/api/agent/deep-run")
+async def agent_deep_run(req: DeepRunRequest, request: Request):
+    """DeepResearch 模式入口。
+
+    相比 /api/agent/run(quick), 这条路径走 BriefWriter→DraftWriter→
+    Supervisor(think/conduct/refine 多步降噪 + Red Team + Evaluator 三维评分)
+    → FinalWriter 流式报告。适合需要更深度、更严谨、可量化的研究场景。
+
+    数据源由 config.SEARCH_BACKEND 决定: kb_only / web_only / hybrid。
+    """
+    async_client = AsyncOpenAI(
+        api_key=DEEPSEEK_API_KEY,
+        base_url=DEEPSEEK_BASE_URL,
+        timeout=DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+
+    run_id = req.run_id or str(uuid.uuid4())
+    cancel_event = asyncio.Event()
+    _deep_cancel_events[run_id] = cancel_event
+
+    async def generate() -> AsyncGenerator[str, None]:
+        from agents.deep_research import DeepResearchOrchestrator
+        from agents.deep_research.context import build_deep_research_task
+        from agent_skills.loader import FileSkillRegistry
+        from harness import RetryPolicy, Guardrails
+        from agents.deep_research.budget import ModelPrice, ResearchBudget
+        from harness.lessons import LessonStore
+        from harness.context import AgentContextBuilder
+        from skills import SkillExtractor
+
+        # 注入技能库 + Harness lessons。历史只作为研究上下文，技能匹配、
+        # Guardrails 和效果评分仍围绕用户本轮问题执行。
+        store = _get_skill_store()
+        relevant_skills = store.search(req.task, top_k=3)
+        injected_skill_ids = [s.skill_id for s in relevant_skills]
+        file_skills = FileSkillRegistry().match(req.task)
+        surfaced_skills = [
+            *[{'name': s.name, 'description': s.description} for s in relevant_skills],
+            *[{'name': s.name, 'description': s.description} for s in file_skills],
+        ]
+        if surfaced_skills:
+            yield f"data: {json.dumps({'type': 'skills', 'skills': surfaced_skills}, ensure_ascii=False)}\n\n"
+
+        lesson_store = LessonStore(DATA_PATH / "harness_lessons.json")
+        context_builder = AgentContextBuilder(lesson_store)
+        lesson_context = context_builder.build(req.task)
+
+        guardrails = Guardrails()
+        research_budget = ResearchBudget(
+            max_input_tokens=DEEP_RESEARCH_MAX_INPUT_TOKENS,
+            max_output_tokens=DEEP_RESEARCH_MAX_OUTPUT_TOKENS,
+            max_tool_calls=DEEP_RESEARCH_MAX_TOOL_CALLS,
+            max_cost_usd=DEEP_RESEARCH_MAX_COST_USD or None,
+            prices={
+                "deepseek-v4-flash": ModelPrice(
+                    input_per_million_usd=DEEP_RESEARCH_FLASH_INPUT_PER_MILLION_USD,
+                    output_per_million_usd=DEEP_RESEARCH_FLASH_OUTPUT_PER_MILLION_USD,
+                ),
+                "deepseek-v4-pro": ModelPrice(
+                    input_per_million_usd=DEEP_RESEARCH_PRO_INPUT_PER_MILLION_USD,
+                    output_per_million_usd=DEEP_RESEARCH_PRO_OUTPUT_PER_MILLION_USD,
+                ),
+            },
+        )
+
+        research_task = build_deep_research_task(
+            req.task,
+            [turn.model_dump() for turn in req.history],
+        )
+        orch = DeepResearchOrchestrator(
+            async_client, DEEPSEEK_MODEL,
+            checkpoint_store=_get_checkpoint_store(),
+            policy=RetryPolicy(max_attempts=3, base_delay=1.0),
+            circuit=_get_harness_circuit(),
+            budget=research_budget,
+        )
+        trace = tracer.trace("deep_research", metadata={"task": req.task[:200]})
+        transcript_parts: list[str] = []
+        final_output = ""
+        total_tool_calls = 0
+
+        try:
+            guardrails.pre_check(req.task)
+
+            async def monitor_disconnect() -> None:
+                while not cancel_event.is_set():
+                    if await request.is_disconnected():
+                        cancel_event.set()
+                        return
+                    await asyncio.sleep(0.25)
+
+            disconnect_task = asyncio.create_task(monitor_disconnect())
+
+            async for event in orch.run_stream(
+                research_task,
+                run_id=run_id,
+                lesson_context=lesson_context,
+                cancel_event=cancel_event,
+            ):
+                ev_type = event.get("type")
+                if ev_type == "text":
+                    transcript_parts.append(event.get("content", ""))
+                    final_output += event.get("content", "")
+                elif ev_type == "plan":
+                    transcript_parts.append(json.dumps(event, ensure_ascii=False))
+                elif ev_type == "agent_done":
+                    transcript_parts.append(json.dumps(event, ensure_ascii=False))
+                    # usage 暂未透传, 累加 sub_agent_tool 次数作为代理指标
+                    total_tool_calls += 1
+                elif ev_type == "sub_agent_tool":
+                    total_tool_calls += 1
+
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            _get_harness_circuit().record_success()
+
+            real_budget = research_budget.summary()
+            yield f"data: {json.dumps({'type': 'harness', 'budget': real_budget}, ensure_ascii=False)}\n\n"
+
+            # 后台技能提取(非阻塞)
+            transcript = "\n".join(transcript_parts)
+            extractor = SkillExtractor(async_client, DEEPSEEK_MODEL)
+            new_skills = await extractor.extract(req.task, transcript)
+            for skill in new_skills:
+                store.save(skill)
+            if new_skills:
+                yield f"data: {json.dumps({'type': 'skill_learned', 'count': len(new_skills), 'names': [s.name for s in new_skills]}, ensure_ascii=False)}\n\n"
+
+            # 反馈回路: 评分并更新 lessons/skills 效果
+            if final_output and (injected_skill_ids or context_builder.last_injected_ids):
+                from evals.rubric_scorer import score_response
+                rubric = await score_response(req.task, final_output[:1500], "", async_client)
+                if context_builder.last_injected_ids:
+                    lesson_store.record_outcome(context_builder.last_injected_ids, rubric.normalised)
+                if injected_skill_ids:
+                    store.record_outcome(injected_skill_ids, rubric.normalised)
+
+        except Exception as exc:
+            _get_harness_circuit().record_failure()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        finally:
+            cancel_event.set()
+            if "disconnect_task" in locals():
+                disconnect_task.cancel()
+                await asyncio.gather(disconnect_task, return_exceptions=True)
+            _deep_cancel_events.pop(run_id, None)
+            tracer.flush()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/agent/deep-run/{run_id}/cancel")
+async def agent_deep_cancel(run_id: str):
+    event = _deep_cancel_events.get(run_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="DeepResearch run is not active")
+    event.set()
+    return {"ok": True, "run_id": run_id}
+
+
+@app.post("/api/agent/deep-export")
+async def agent_deep_export(req: DeepExportRequest):
+    """Download the final DeepResearch report as Markdown or PDF."""
+    from urllib.parse import quote
+    from agents.deep_research.report_export import render_markdown, render_pdf
+
+    safe_stem = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", req.title).strip("-_")[:80]
+    safe_stem = safe_stem or "deep-research"
+    if req.format == "pdf":
+        payload = await asyncio.to_thread(render_pdf, req.title, req.content)
+        media_type = "application/pdf"
+    else:
+        payload = render_markdown(req.title, req.content)
+        media_type = "text/markdown; charset=utf-8"
+    filename = f"{safe_stem}.{req.format}"
+    disposition = f"attachment; filename=deep-research.{req.format}; filename*=UTF-8''{quote(filename)}"
+    return Response(payload, media_type=media_type, headers={"Content-Disposition": disposition})
+
+
 # ── Skills API ───────────────────────────────────────────────────────────────
 
 @app.get("/api/skills")
@@ -1497,6 +1678,23 @@ async def skills_list():
     """Return all stored skills (index only, no procedure body)."""
     store = _get_skill_store()
     return {"skills": store.list_all()}
+
+
+@app.get("/api/agent-skills/status")
+async def agent_skills_status():
+    """Configuration readiness without returning API secrets."""
+    import config as runtime_config
+    from agent_skills.loader import FileSkillRegistry
+
+    return {
+        "skills": FileSkillRegistry().list_all(),
+        "web_search": {
+            "enabled_for_cn_fund": runtime_config.CN_FUND_ENABLE_WEB_SEARCH,
+            "configured": bool(runtime_config.TAVILY_API_KEY),
+        },
+        "annual_risk_free_rate": runtime_config.CN_FUND_ANNUAL_RISK_FREE_RATE,
+        "default_benchmark": runtime_config.CN_FUND_DEFAULT_BENCHMARK or None,
+    }
 
 
 @app.delete("/api/skills/{skill_id}")

@@ -6,7 +6,7 @@ import NoteEditor from './components/NoteEditor'
 import StatsPanel from './components/StatsPanel'
 import ReviewPanel from './components/ReviewPanel'
 import RecommendationsPanel from './components/RecommendationsPanel'
-import ArticlePanel from './components/ArticlePanel'
+import DeepResearchPanel from './components/DeepResearchPanel'
 import RecallPanel from './components/RecallPanel'
 import GraphPanel from './components/GraphPanel'
 import MemorySidebar from './components/MemorySidebar'
@@ -56,7 +56,7 @@ export default function App() {
     { id: 'import', label: '导入笔记' },
     { id: 'ai', label: 'AI 对话' },
     { id: 'note', label: '笔记', disabled: !selectedVideo },
-    { id: 'article', label: '综合文章' },
+    { id: 'deep', label: '深度研究' },
     { id: 'recall', label: '主动回忆' },
     { id: 'graph', label: '知识图谱' },
     { id: 'review', label: '复盘' },
@@ -123,6 +123,10 @@ export default function App() {
           <div className={`h-full flex flex-col min-h-0 ${activeTab === 'ai' ? '' : 'hidden'}`}>
             <AiPanel suggestedVideo={selectedVideo} />
           </div>
+          {/* DeepResearch always stays mounted so switching tabs does not lose a running report. */}
+          <div className={`h-full flex flex-col min-h-0 ${activeTab === 'deep' ? '' : 'hidden'}`}>
+            <DeepResearchPanel />
+          </div>
           {activeTab === 'add' && (
             <div className="max-w-2xl space-y-5 overflow-y-auto h-full pb-4">
               <VideoInput
@@ -145,7 +149,6 @@ export default function App() {
             />
           )}
           {activeTab === 'stats' && <StatsPanel />}
-          {activeTab === 'article' && <ArticlePanel />}
           {activeTab === 'review' && <ReviewPanel />}
           {activeTab === 'recall' && <RecallPanel videos={videos} />}
           {activeTab === 'graph' && <GraphPanel />}

@@ -1,4 +1,4 @@
-import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus } from '../types'
+import type { ProcessingEvent, Video, ChatMessage, Stats, Review, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus } from '../types'
 
 const BASE = '/api'
 
@@ -67,24 +67,6 @@ export async function updateNote(id: string, insights: string): Promise<void> {
     body: JSON.stringify({ insights }),
   })
   if (!res.ok) throw new Error(await res.text())
-}
-
-export async function fetchArticles(): Promise<Article[]> {
-  const res = await fetch(`${BASE}/articles`)
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-export async function generateArticle(
-  topic: string,
-): Promise<{ article: string; path: string; source_count: number }> {
-  const res = await fetch(`${BASE}/generate-article`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic }),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
 }
 
 export async function generateReview(days = 7): Promise<{
@@ -318,6 +300,63 @@ export async function* streamAgentRun(task: string): AsyncGenerator<AgentEvent> 
 
 export async function confirmAgentRun(runId: string): Promise<void> {
   await fetch(`${BASE}/agent/confirm/${runId}`, { method: 'POST' })
+}
+
+
+// ── DeepResearch mode (自进化+对抗降噪循环) ─────────────────────────────────
+
+export interface DeepResearchTurn {
+  question: string
+  answer: string
+}
+
+export async function* streamDeepAgentRun(
+  task: string,
+  history: DeepResearchTurn[] = [],
+  signal?: AbortSignal,
+): AsyncGenerator<AgentEvent> {
+  const res = await fetch(`${BASE}/agent/deep-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task, history }),
+    signal,
+  })
+  if (!res.ok) throw new Error(await res.text())
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      try { yield JSON.parse(line.slice(6)) as AgentEvent } catch { /* ignore */ }
+    }
+  }
+}
+
+export async function cancelDeepAgentRun(runId: string): Promise<void> {
+  const res = await fetch(`${BASE}/agent/deep-run/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+  })
+  if (!res.ok && res.status !== 404) throw new Error(await res.text())
+}
+
+export async function exportDeepResearchReport(
+  title: string,
+  content: string,
+  format: 'md' | 'pdf',
+): Promise<Blob> {
+  const res = await fetch(`${BASE}/agent/deep-export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, content, format }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.blob()
 }
 
 
