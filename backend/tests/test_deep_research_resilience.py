@@ -64,6 +64,99 @@ async def test_subresearcher_disables_default_thinking():
     assert create.await_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
+@pytest.mark.asyncio
+async def test_subresearcher_main_uses_responses_but_compression_stays_on_chat(
+    monkeypatch,
+):
+    from agents.deep_research import sub_researcher as module
+
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "think_tool",
+            "description": "Reflect on the evidence plan",
+            "parameters": {
+                "type": "object",
+                "properties": {"reflection": {"type": "string"}},
+                "required": ["reflection"],
+            },
+        },
+    }]
+    monkeypatch.setattr(module, "DEEP_RESEARCH_SUB_MAX_STEPS", 3)
+    monkeypatch.setattr(module, "get_sub_researcher_tools", lambda *_: (tools, ["think_tool"]))
+    monkeypatch.setattr(module.FileSkillRegistry, "prompt_for", lambda *_: "")
+
+    executed = []
+
+    async def execute_tool(name, arguments, **_kwargs):
+        executed.append((name, arguments))
+        return "reflection recorded"
+
+    monkeypatch.setattr(module, "execute_tool_call", execute_tool)
+
+    responses_create = AsyncMock(side_effect=[
+        SimpleNamespace(
+            output=[{
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "think_tool",
+                "arguments": '{"reflection":"search official sources"}',
+            }],
+            output_text="",
+            usage=SimpleNamespace(input_tokens=10, output_tokens=2),
+        ),
+        SimpleNamespace(
+            output=[{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "research complete"}],
+            }],
+            output_text="research complete",
+            usage=SimpleNamespace(input_tokens=20, output_tokens=3),
+        ),
+    ])
+    chat_create = AsyncMock(return_value=_llm_response("compressed evidence"))
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=responses_create),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=chat_create)),
+    )
+    researcher = SubResearcher(
+        client,
+        "deepseek-v4-flash",
+        compressor_model="deepseek-v4-flash",
+        main_api="responses",
+        policy=RetryPolicy(max_attempts=1),
+    )
+
+    events = [event async for event in researcher.run_stream("research topic")]
+
+    assert responses_create.await_count == 2
+    first_request = responses_create.await_args_list[0].kwargs
+    second_request = responses_create.await_args_list[1].kwargs
+    assert first_request["reasoning"] == {"effort": "none"}
+    assert first_request["tools"][0]["name"] == "think_tool"
+    assert "function" not in first_request["tools"][0]
+    assert [item.get("type", "message") for item in second_request["input"]] == [
+        "message",
+        "function_call",
+        "function_call_output",
+    ]
+    assert second_request["input"][-1]["call_id"] == "call-1"
+    assert executed == [("think_tool", {"reflection": "search official sources"})]
+    assert chat_create.await_count == 1
+    assert chat_create.await_args.kwargs["model"] == "deepseek-v4-flash"
+    assert next(event for event in events if event["type"] == "sub_agent_tool")["args"] == (
+        '{"reflection":"search official sources"}'
+    )
+    done = next(event for event in events if event["type"] == "sub_agent_done")
+    assert done["result"] == "compressed evidence"
+    assert done["usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 5,
+        "tool_calls": 1,
+    }
+
+
 def test_openai_connection_error_is_retryable():
     error = APIConnectionError(request=httpx.Request("POST", "https://model.invalid"))
     assert RetryPolicy().is_retryable(error)

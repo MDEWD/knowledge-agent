@@ -949,6 +949,7 @@ class DeepResearchOrchestrator:
 
         final_draft = draft
         notes: list[str] = []
+        final_evidence: list[Evidence] = []
         try:
             async for ev in self._run_supervisor_loop(
                 task=enriched_task, brief=brief, draft=draft, run_id=run_id,
@@ -956,6 +957,8 @@ class DeepResearchOrchestrator:
                 if ev.get("type") == "__supervisor_final__":
                     final_draft = ev.get("draft", draft)
                     notes = ev.get("notes", []) or []
+                    final_state = ev.get("state")
+                    final_evidence = list(getattr(final_state, "evidence", []) or [])
                     continue
                 yield ev
         except Exception as exc:
@@ -981,6 +984,12 @@ class DeepResearchOrchestrator:
         async for delta in self._final_report_stream(brief, notes, final_draft):
             final_text += delta
             yield {"type": "text", "content": delta}
+
+        from agents.deep_research.citation_validator import ensure_clickable_sources
+        linked_report = ensure_clickable_sources(final_text, final_evidence)
+        if linked_report != final_text:
+            final_text = linked_report
+            yield {"type": "report_replace", "content": final_text}
 
         yield {
             "type": "agent_done",

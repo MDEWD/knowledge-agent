@@ -32,6 +32,30 @@ _Avoid_: feedback, comment
 The rules that govern search routing, budgets, stopping, cancellation, and quality gates for a Research Run.
 _Avoid_: configuration, prompt rules
 
+**Memory Observation**:
+An immutable, source-linked event that may or may not be selected for long-term retention.
+_Avoid_: memory, fact
+
+**Memory Fact**:
+A versioned, structured assertion retained because it can improve a future Agent decision.
+_Avoid_: raw chat, vector chunk
+
+**Memory Scope**:
+The task, Agent, project, or time conditions under which a Memory Fact applies.
+_Avoid_: tag, metadata blob
+
+**Memory Conflict**:
+Two incompatible Memory Facts whose scopes overlap and therefore require deterministic or user-driven resolution.
+_Avoid_: duplicate, latest value
+
+**Reflection Cycle**:
+A consolidation pass that derives stable Memory Facts or Procedures from multiple Memory Observations and safely decays obsolete records.
+_Avoid_: answer completeness check, search reflection
+
+**Working Memory**:
+The small, task-matched set of Memory Facts selected for the current Agent decision.
+_Avoid_: all user history, top-k vector results
+
 ## Relationships
 
 - A **Research Run** owns exactly one current **Research State** and a history of checkpoints.
@@ -39,6 +63,11 @@ _Avoid_: configuration, prompt rules
 - A **Claim** has zero or more **Citations**, each pointing to one **Evidence** record.
 - A **Critique** remains open until a later **Research State** resolves or rejects it with evidence.
 - A **Research Policy** decides whether a **Research Run** continues, stops, or is cancelled.
+- A **Memory Observation** can encode zero or more versioned **Memory Facts**.
+- A **Memory Fact** is valid only inside its **Memory Scope** and temporal validity window.
+- A **Memory Conflict** exists only when incompatible values have overlapping **Memory Scopes**.
+- A **Reflection Cycle** consolidates Memory Observations into durable Memory Facts and Procedures.
+- **Working Memory** contains only the Memory Facts selected for the current task and Agent.
 
 ## Example dialogue
 

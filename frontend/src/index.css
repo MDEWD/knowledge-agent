@@ -43,6 +43,23 @@
 .prose-custom p {
   @apply text-sm mb-2;
 }
+.prose-custom a,
+.prose-custom a:visited {
+  color: #60a5fa;
+  text-decoration-line: underline;
+  text-decoration-color: rgb(96 165 250 / 0.5);
+  text-underline-offset: 3px;
+  transition: color 150ms ease, text-decoration-color 150ms ease;
+}
+.prose-custom a:hover {
+  color: #93c5fd;
+  text-decoration-color: currentColor;
+}
+.prose-custom a:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
 
 /* ── Light Mode ─────────────────────────────────────────────────────────────── */
 
@@ -251,3 +268,6 @@ html.light .prose-custom h2         { color: #2563eb; }
 html.light .prose-custom h3         { color: #374151; }
 html.light .prose-custom strong     { color: #111827; }
 html.light .prose-custom code       { background-color: #f3f4f6; color: #16a34a; }
+html.light .prose-custom a,
+html.light .prose-custom a:visited  { color: #2563eb; text-decoration-color: rgb(37 99 235 / 0.45); }
+html.light .prose-custom a:hover    { color: #1d4ed8; text-decoration-color: currentColor; }

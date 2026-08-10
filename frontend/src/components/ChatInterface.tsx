@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { streamChat, fetchVideos, fetchStats } from '../api/client'
-import type { ChatMessage, CitationSource, Stats, ToolCallRecord, Video, YoutubeVideoSuggestion } from '../types'
+import {
+  deleteChatHistory,
+  fetchChatHistory,
+  fetchMemoryConflicts,
+  fetchStats,
+  fetchVideos,
+  resolveMemoryConflict,
+  saveChatHistory,
+  streamChat,
+} from '../api/client'
+import type { ChatMessage, CitationSource, MemoryConflict, Stats, ToolCallRecord, Video, YoutubeVideoSuggestion } from '../types'
 
-let _idCounter = 0
-const nextId = () => String(++_idCounter)
+const nextId = () => crypto.randomUUID()
 
 const STORAGE_KEY = 'chat_messages'
 const MODEL_STORAGE_KEY = 'chat_model'
@@ -65,17 +73,65 @@ export default function ChatInterface({ suggestedVideo }: Props) {
   const [modelId, setModelId] = useState<string>(
     () => localStorage.getItem(MODEL_STORAGE_KEY) ?? 'deepseek'
   )
+  const [historyReady, setHistoryReady] = useState(false)
+  const [memoryConflict, setMemoryConflict] = useState<MemoryConflict | null>(null)
+  const [resolvingConflict, setResolvingConflict] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const toolCallsRef = useRef<ToolCallRecord[]>([])
+  const chatSessionIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, toolActivity])
 
   useEffect(() => {
+    let cancelled = false
+    const hydrate = async () => {
+      const localMessages = loadMessages()
+      try {
+        const serverSession = await fetchChatHistory()
+        if (cancelled) return
+        if (serverSession?.messages.length) {
+          chatSessionIdRef.current = serverSession.id
+          setMessages(serverSession.messages)
+          if (serverSession.model) {
+            setModelId(serverSession.model)
+            localStorage.setItem(MODEL_STORAGE_KEY, serverSession.model)
+          }
+        } else if (localMessages.some((message) => message.role === 'user')) {
+          const migrated = await saveChatHistory(null, localMessages, modelId)
+          if (cancelled) return
+          chatSessionIdRef.current = migrated.id
+        }
+      } catch {
+        // Keep the local browser backup when the backend is temporarily unavailable.
+      } finally {
+        if (!cancelled) setHistoryReady(true)
+      }
+    }
+    void hydrate()
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages)) } catch { /* ignore */ }
-  }, [messages])
+    if (!historyReady || loading || !messages.some((message) => message.role === 'user')) return
+    const timer = window.setTimeout(() => {
+      void saveChatHistory(chatSessionIdRef.current, messages, modelId)
+        .then((session) => { chatSessionIdRef.current = session.id })
+        .catch(() => {})
+    }, 600)
+    return () => window.clearTimeout(timer)
+  }, [historyReady, loading, messages, modelId])
+
+  const clearConversation = () => {
+    const sessionId = chatSessionIdRef.current
+    chatSessionIdRef.current = null
+    setMessages([WELCOME])
+    localStorage.removeItem(STORAGE_KEY)
+    if (sessionId) void deleteChatHistory(sessionId).catch(() => {})
+  }
 
   useEffect(() => {
     if (suggestedVideo) {
@@ -89,6 +145,30 @@ export default function ChatInterface({ suggestedVideo }: Props) {
       .then(([vids, stats]) => setSuggestions(buildSuggestions(vids, stats)))
       .catch(() => {})
   }, [])
+
+  const refreshMemoryConflict = async () => {
+    try {
+      const conflicts = await fetchMemoryConflicts()
+      setMemoryConflict(conflicts[0] ?? null)
+    } catch {
+      // Memory confirmation should never block the chat experience.
+    }
+  }
+
+  useEffect(() => {
+    void refreshMemoryConflict()
+  }, [])
+
+  const chooseMemory = async (winnerMemoryId: number, reason: string) => {
+    if (!memoryConflict || resolvingConflict) return
+    setResolvingConflict(true)
+    try {
+      await resolveMemoryConflict(memoryConflict.id, winnerMemoryId, reason)
+      await refreshMemoryConflict()
+    } finally {
+      setResolvingConflict(false)
+    }
+  }
 
   // ── Core send logic ──────────────────────────────────────────────────────────
 
@@ -157,6 +237,8 @@ export default function ChatInterface({ suggestedVideo }: Props) {
       }
       setLoading(false)
       setToolActivity('')
+      // Memory encoding runs after the response stream, so check shortly afterwards.
+      window.setTimeout(() => { void refreshMemoryConflict() }, 1200)
     }
   }
 
@@ -209,12 +291,44 @@ export default function ChatInterface({ suggestedVideo }: Props) {
       {/* Header */}
       <div className="flex justify-end pb-2 shrink-0">
         <button
-          onClick={() => { setMessages([WELCOME]); localStorage.removeItem(STORAGE_KEY) }}
+          onClick={clearConversation}
           className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
         >
           清除对话
         </button>
       </div>
+
+      {memoryConflict && (
+        <div className="mb-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 shrink-0">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-amber-300">请确认你的记忆偏好</p>
+              <p className="mt-1 text-xs text-gray-400">检测到同一场景下存在两种说法，请选择以后采用哪一条。</p>
+            </div>
+            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-300">待确认</span>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              disabled={resolvingConflict}
+              onClick={() => void chooseMemory(memoryConflict.existing_memory_id, '用户确认保留原记忆')}
+              className="rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 text-left text-xs text-gray-300 transition hover:border-blue-500 hover:bg-blue-500/10 disabled:opacity-50"
+            >
+              <span className="mb-1 block text-[11px] text-gray-500">原记忆</span>
+              {memoryConflict.existing_content}
+            </button>
+            <button
+              type="button"
+              disabled={resolvingConflict}
+              onClick={() => void chooseMemory(memoryConflict.candidate_memory_id, '用户确认采用新记忆')}
+              className="rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 text-left text-xs text-gray-300 transition hover:border-blue-500 hover:bg-blue-500/10 disabled:opacity-50"
+            >
+              <span className="mb-1 block text-[11px] text-gray-500">新记忆</span>
+              {memoryConflict.candidate_content}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-1 py-2 space-y-4 min-h-0">

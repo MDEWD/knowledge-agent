@@ -13,7 +13,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from agents.deep_research.budget import ResearchBudgetExceeded
-from agents.deep_research.citation_validator import CitationValidator
+from agents.deep_research.citation_validator import CitationValidator, ensure_clickable_sources
 from agents.deep_research.search_policy import SearchQualityPolicy
 from agents.deep_research.state import (
     ResearchPhase,
@@ -253,6 +253,11 @@ class DeepResearchGraphRuntime:
                         "label": "FinalWriter 连接暂时不可用，已返回当前最佳草稿",
                     })
                     emit({"type": "report_replace", "content": report})
+
+            linked_report = ensure_clickable_sources(report, state.evidence)
+            if linked_report != report:
+                report = linked_report
+                emit({"type": "report_replace", "content": report})
 
             validator = CitationValidator()
             claims = validator.extract_claims(report)

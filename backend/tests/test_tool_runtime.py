@@ -57,6 +57,44 @@ async def test_execute_turn_returns_one_contiguous_response_per_tool_call():
 
 
 @pytest.mark.asyncio
+async def test_execute_response_returns_atomic_function_call_outputs():
+    async def lookup(query: str) -> dict:
+        return {"query": query, "sources": 3}
+
+    runtime = ToolRuntime({"lookup": lookup})
+    response = SimpleNamespace(
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "response-call-1",
+                "name": "lookup",
+                "arguments": '{"query":"semiconductors"}',
+            }
+        ],
+        output_text="",
+        usage=SimpleNamespace(input_tokens=23, output_tokens=7),
+    )
+
+    turn = await runtime.execute_response(response)
+
+    assert [item["type"] for item in turn.input_items] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert turn.input_items[1]["call_id"] == "response-call-1"
+    assert json.loads(turn.input_items[1]["output"]) == {
+        "query": "semiconductors",
+        "sources": 3,
+    }
+    assert [message["role"] for message in turn.messages] == ["assistant", "tool"]
+    assert turn.usage.as_dict() == {
+        "input_tokens": 23,
+        "output_tokens": 7,
+        "tool_calls": 1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool_is_a_tool_message_not_an_exception():
     runtime = ToolRuntime({})
 

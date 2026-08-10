@@ -31,6 +31,7 @@ from agent_skills.loader import FileSkillRegistry
 from agents.deep_research.cancellation import await_with_cancel
 from config import DEEP_RESEARCH_SUB_MAX_STEPS
 from config import DEEP_RESEARCH_LLM_TIMEOUT_SECONDS
+from config import DEEP_RESEARCH_RESEARCHER_MAIN_API
 from harness.retry import CircuitBreaker, RetryPolicy, async_retry
 
 if TYPE_CHECKING:
@@ -65,6 +66,7 @@ class SubResearcher:
         *,
         summarizer_model: str | None = None,
         compressor_model: str | None = None,
+        main_api: str = DEEP_RESEARCH_RESEARCHER_MAIN_API,
         llm_timeout_seconds: float = DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
         policy: RetryPolicy | None = None,
         circuit: CircuitBreaker | None = None,
@@ -75,6 +77,7 @@ class SubResearcher:
         self.model = model
         self.summarizer_model = summarizer_model or model
         self.compressor_model = compressor_model or model
+        self.main_api = _normalize_main_api(main_api)
         self.llm_timeout_seconds = llm_timeout_seconds
         self._policy = policy or RetryPolicy(max_attempts=3, base_delay=1.0)
         self._circuit = circuit
@@ -114,6 +117,47 @@ class SubResearcher:
         )
         return response
 
+    async def _responses_llm(self, **kwargs):
+        """Call the stateless Responses API for researcher_main only."""
+
+        role = kwargs.pop("_role", "researcher_main")
+        # DeepSeek V4 enables thinking by default. Tool-oriented SubResearcher
+        # calls favor latency and deterministic function calls, so disable it
+        # using the Responses API control surface rather than Chat-only options.
+        kwargs.setdefault("reasoning", {"effort": "none"})
+
+        async def _call():
+            responses = getattr(self.client, "responses", None)
+            create = getattr(responses, "create", None)
+            if not callable(create):
+                raise RuntimeError(
+                    "The configured OpenAI SDK/client does not expose "
+                    "client.responses.create; install openai>=1.75 or set "
+                    "DEEP_RESEARCH_RESEARCHER_MAIN_API=chat_completions"
+                )
+            return await await_with_cancel(
+                create(**kwargs),
+                timeout_seconds=self.llm_timeout_seconds,
+                cancel_event=self._cancel_event,
+            )
+
+        response = await async_retry(
+            _call,
+            policy=self._policy,
+            circuit=self._circuit,
+            label=f"SubResearcher/{role}/responses",
+        )
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", 0) if usage is not None else 0
+        output_tokens = getattr(usage, "output_tokens", 0) if usage is not None else 0
+        self.budget.charge_llm(
+            role=role,
+            model=str(kwargs.get("model", self.model)),
+            input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
+            output_tokens=int(output_tokens) if isinstance(output_tokens, (int, float)) else 0,
+        )
+        return response
+
     async def _llm_text(self, prompt: str, *, temperature: float = 0.3) -> str:
         """单次文本 LLM 调用, 返回 content 字符串(供网页摘要等使用)。"""
         resp = await self._llm(
@@ -146,19 +190,39 @@ class SubResearcher:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": research_topic},
         ]
+        response_input: list[dict] = [
+            {"role": "user", "content": research_topic},
+        ]
         total_input_tokens = 0
         total_output_tokens = 0
         total_tool_calls = 0
 
         for step in range(DEEP_RESEARCH_SUB_MAX_STEPS):
             try:
-                resp = await self._llm(
-                    model=self.model,
-                    messages=messages,
-                    tools=self._tools if self._tools else None,
-                    temperature=0.3,
-                    _role="researcher_main",
-                )
+                if self.main_api == "responses":
+                    request: dict[str, Any] = {
+                        "model": self.model,
+                        "instructions": system_prompt,
+                        # Pass an immutable turn snapshot to the SDK. The local
+                        # stateless history is extended only after this request
+                        # completes, so concurrent serialization cannot observe
+                        # a partially assembled next turn.
+                        "input": list(response_input),
+                        "temperature": 0.3,
+                        "_role": "researcher_main",
+                    }
+                    response_tools = self._responses_tool_schemas()
+                    if response_tools:
+                        request["tools"] = response_tools
+                    resp = await self._responses_llm(**request)
+                else:
+                    resp = await self._llm(
+                        model=self.model,
+                        messages=messages,
+                        tools=self._tools if self._tools else None,
+                        temperature=0.3,
+                        _role="researcher_main",
+                    )
             except Exception as exc:
                 if not _is_content_risk(exc):
                     raise
@@ -167,20 +231,18 @@ class SubResearcher:
                     "retrying with tool payloads isolated"
                 )
                 messages = self._isolate_tool_payloads(messages)
-                resp = await self._llm(
-                    model=self.model,
-                    messages=messages,
-                    tools=self._tools if self._tools else None,
-                    temperature=0.3,
-                    _role="researcher_main",
-                )
-            msg = resp.choices[0].message
-
-            # 自然停止(没有 tool_calls)
-            if not getattr(msg, "tool_calls", None):
-                logger.info("[SubResearcher] natural stop at step %d", step)
-                messages.append({"role": "assistant", "content": msg.content or ""})
-                break
+                if self.main_api == "responses":
+                    response_input = self._isolate_response_items(response_input)
+                    request["input"] = list(response_input)
+                    resp = await self._responses_llm(**request)
+                else:
+                    resp = await self._llm(
+                        model=self.model,
+                        messages=messages,
+                        tools=self._tools if self._tools else None,
+                        temperature=0.3,
+                        _role="researcher_main",
+                    )
 
             # ToolRuntime 原子生成 assistant + 连续完整 ToolMessage，避免任何
             # 分支遗漏 tool_call_id。工具事件通过 Queue 继续实时透传给 SSE。
@@ -209,16 +271,12 @@ class SubResearcher:
             async def runtime_event(event: dict) -> None:
                 if event.get("type") == "tool_start":
                     name = event.get("tool", "")
-                    call = next(
-                        (tc for tc in msg.tool_calls if tc.id == event.get("tool_call_id")),
-                        None,
-                    )
                     await event_queue.put({
                         "type": "sub_agent_tool",
                         "agent": "SubResearcher",
                         "tool": name,
                         "label": _TOOL_LABELS.get(name, name),
-                        "args": call.function.arguments if call else "{}",
+                        "args": event.get("arguments", "{}"),
                     })
 
             runtime = ToolRuntime(
@@ -229,7 +287,12 @@ class SubResearcher:
 
             async def execute_turn():
                 try:
-                    return await runtime.execute_turn(msg, usage=getattr(resp, "usage", None))
+                    if self.main_api == "responses":
+                        return await runtime.execute_response(resp)
+                    msg = resp.choices[0].message
+                    return await runtime.execute_turn(
+                        msg, usage=getattr(resp, "usage", None)
+                    )
                 finally:
                     await event_queue.put(None)
 
@@ -241,11 +304,16 @@ class SubResearcher:
                 yield streamed_event
             turn = await turn_task
             messages.extend(turn.messages)
+            if self.main_api == "responses":
+                response_input.extend(turn.input_items)
             total_input_tokens += turn.usage.input_tokens
             total_output_tokens += turn.usage.output_tokens
             total_tool_calls += turn.usage.tool_calls
             for result in turn.results:
                 self.budget.charge_tool(result.name)
+            if turn.usage.tool_calls == 0:
+                logger.info("[SubResearcher] natural stop at step %d", step)
+                break
 
         # 压缩研究成果
         yield {
@@ -356,6 +424,40 @@ class SubResearcher:
             isolated.append(safe)
         return isolated
 
+    def _responses_tool_schemas(self) -> list[dict[str, Any]]:
+        """Convert Chat Completions tool schemas to Responses API schemas."""
+
+        converted: list[dict[str, Any]] = []
+        for schema in self._tools:
+            function = schema.get("function") or {}
+            item: dict[str, Any] = {
+                "type": "function",
+                "name": function.get("name", ""),
+                "parameters": function.get("parameters") or {
+                    "type": "object",
+                    "properties": {},
+                },
+            }
+            if function.get("description"):
+                item["description"] = function["description"]
+            converted.append(item)
+        return converted
+
+    @staticmethod
+    def _isolate_response_items(items: list[dict]) -> list[dict]:
+        """Remove rejected retrieved text while preserving tool-call pairing."""
+
+        isolated: list[dict] = []
+        for item in items:
+            safe = dict(item)
+            if safe.get("type") == "function_call_output":
+                safe["output"] = (
+                    "[该工具正文触发模型供应商内容安全策略，已隔离。"
+                    "请改用其他来源继续研究，不得根据被隔离正文形成结论。]"
+                )
+            isolated.append(safe)
+        return isolated
+
 
 def _is_content_risk(exc: BaseException) -> bool:
     current: BaseException | None = exc
@@ -366,3 +468,15 @@ def _is_content_risk(exc: BaseException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _normalize_main_api(value: str) -> str:
+    normalized = str(value or "").strip().casefold().replace("-", "_")
+    if normalized in {"responses", "response"}:
+        return "responses"
+    if normalized in {"chat", "chat_completions", "completions"}:
+        return "chat_completions"
+    raise ValueError(
+        "DEEP_RESEARCH_RESEARCHER_MAIN_API must be 'responses' or "
+        "'chat_completions'"
+    )

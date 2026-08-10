@@ -64,6 +64,15 @@ export interface ChatMessage {
   toolCallRecords?: ToolCallRecord[]
 }
 
+export interface ChatHistorySession {
+  id: string
+  title: string
+  model: string
+  messages: ChatMessage[]
+  created_at?: string
+  updated_at?: string
+}
+
 export interface Stats {
   total: number
   total_duration: number
@@ -87,7 +96,7 @@ export interface Review {
   content: string
 }
 
-export type ActiveTab = 'add' | 'import' | 'ai' | 'note' | 'stats' | 'review' | 'deep' | 'recall' | 'graph'
+export type ActiveTab = 'add' | 'import' | 'ai' | 'note' | 'stats' | 'deep'
 
 // ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
 
@@ -216,6 +225,18 @@ export interface UserMemory {
   key_insights: string[]
   summary: string
   updated_at: string
+}
+
+export interface MemoryConflict {
+  id: string
+  existing_memory_id: number
+  candidate_memory_id: number
+  conflict_type: string
+  existing_content: string
+  candidate_content: string
+  existing_scope: Record<string, string>
+  candidate_scope: Record<string, string>
+  created_at: string
 }
 
 // ── Harness & Skills ──────────────────────────────────────────────────────────

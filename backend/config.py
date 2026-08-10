@@ -15,6 +15,26 @@ OBSIDIAN_VAULT_PATH = Path(
 CHROMA_DB_PATH = Path(os.environ.get("CHROMA_DB_PATH", "./data/chroma_db"))
 DATA_PATH = Path(os.environ.get("DATA_PATH", "./data"))
 
+# MySQL business persistence. When a password is configured, memory/history
+# stores default to MySQL; development and tests without credentials retain the
+# file-backed fallback.
+MYSQL_HOST = os.environ.get("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
+MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "multi_agent_platform")
+MYSQL_USER = os.environ.get("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
+MYSQL_POOL_SIZE = int(os.environ.get("MYSQL_POOL_SIZE", "5"))
+DEFAULT_USER_ID = os.environ.get("DEFAULT_USER_ID", "local-user")
+MEMORY_STORAGE_BACKEND = os.environ.get(
+    "MEMORY_STORAGE_BACKEND",
+    "mysql" if MYSQL_PASSWORD else "json",
+).strip().lower()
+MEMORY_REFLECTION_THRESHOLD = int(os.environ.get("MEMORY_REFLECTION_THRESHOLD", "50"))
+MEMORY_OBSERVATION_TTL_DAYS = int(os.environ.get("MEMORY_OBSERVATION_TTL_DAYS", "30"))
+MEMORY_INFERRED_TTL_DAYS = int(os.environ.get("MEMORY_INFERRED_TTL_DAYS", "180"))
+MEMORY_RETRIEVAL_LIMIT = int(os.environ.get("MEMORY_RETRIEVAL_LIMIT", "12"))
+MEMORY_CONTEXT_MAX_CHARS = int(os.environ.get("MEMORY_CONTEXT_MAX_CHARS", "3000"))
+
 EMBED_MODEL = os.environ.get(
     "EMBED_MODEL",
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -58,6 +78,9 @@ DEEP_RESEARCH_MAX_CONCURRENT = int(os.environ.get("DEEP_RESEARCH_MAX_CONCURRENT"
 DEEP_RESEARCH_MIN_REPAIR_SCORE = float(os.environ.get("DEEP_RESEARCH_MIN_REPAIR_SCORE", "6.0"))
 DEEP_RESEARCH_RED_TEAM_MAX = int(os.environ.get("DEEP_RESEARCH_RED_TEAM_MAX", "3"))
 DEEP_RESEARCH_SUB_MAX_STEPS = int(os.environ.get("DEEP_RESEARCH_SUB_MAX_STEPS", "5"))
+DEEP_RESEARCH_RESEARCHER_MAIN_API = os.environ.get(
+    "DEEP_RESEARCH_RESEARCHER_MAIN_API", "responses"
+).strip().lower()
 DEEP_RESEARCH_LLM_TIMEOUT_SECONDS = float(
     os.environ.get("DEEP_RESEARCH_LLM_TIMEOUT_SECONDS", "120")
 )

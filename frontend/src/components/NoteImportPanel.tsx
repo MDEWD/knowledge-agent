@@ -105,106 +105,108 @@ export default function NoteImportPanel({ onNoteAdded }: { onNoteAdded?: () => v
   const doneTasks = tasks.filter((t) => t.event?.step === 'done' || t.event?.step === 'error')
 
   return (
-    <div className="h-full flex flex-col gap-5 overflow-y-auto pb-4">
-      <div>
-        <h2 className="text-lg font-semibold text-white mb-1">导入本地笔记</h2>
-        <p className="text-sm text-gray-400">
-          将笔记导入知识库，与视频内容一起参与语义检索和 AI 对话
-        </p>
-      </div>
-
-      {/* Drop zone */}
-      <div
-        onClick={() => !uploading && fileInputRef.current?.click()}
-        onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
-        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false) }}
-        onDrop={onDrop}
-        className={`relative border-2 border-dashed rounded-2xl p-10 text-center transition-all
-          ${uploading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
-          ${dragging ? 'border-blue-400 bg-blue-500/10 scale-[1.01]' : 'border-gray-700 hover:border-gray-500 hover:bg-gray-800/20'}`}
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept={ACCEPTED}
-          onChange={onFileChange}
-          className="hidden"
-          disabled={uploading}
-        />
-        <div className="text-5xl mb-3 select-none">{dragging ? '⬇️' : '📂'}</div>
-        <p className="text-sm font-medium text-gray-200 mb-1">
-          {dragging ? '松开以上传' : '点击上传或拖拽文件到此处'}
-        </p>
-        <p className="text-xs text-gray-500 mb-4">支持同时上传多个文件</p>
-        <div className="flex justify-center gap-2">
-          {['MD', 'PDF', 'TXT', 'DOCX'].map((f) => (
-            <span key={f} className="px-2.5 py-1 rounded-lg bg-gray-800 border border-gray-700 text-xs text-gray-400 font-mono">
-              {f}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* Active progress */}
-      {activeTasks.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">处理中 ({activeTasks.length})</p>
-          {activeTasks.map((t) => (
-            <ProgressCard key={t.taskId} task={t} />
-          ))}
-        </div>
-      )}
-
-      {/* Completed / errored tasks */}
-      {doneTasks.length > 0 && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-gray-500 uppercase tracking-wide">本次上传结果</p>
-            <button onClick={clearFinished} className="text-xs text-gray-600 hover:text-gray-400">清除</button>
-          </div>
-          {doneTasks.map((t) => (
-            <div
-              key={t.taskId}
-              className={`rounded-xl px-4 py-2.5 border text-sm ${
-                t.event?.step === 'done'
-                  ? 'bg-green-900/20 border-green-800 text-green-400'
-                  : 'bg-red-900/20 border-red-800 text-red-400'
-              }`}
-            >
-              <span className="mr-2">{t.event?.step === 'done' ? '✓' : '✕'}</span>
-              <span className="truncate">{t.filename}</span>
-              {t.event?.step === 'error' && (
-                <span className="text-xs ml-2 opacity-70">— {t.event.message}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Notes library */}
-      <div className="flex-1 min-h-0">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">
-            笔记库
-            {notes.length > 0 && (
-              <span className="ml-2 px-1.5 py-0.5 bg-gray-700 rounded text-gray-400">{notes.length}</span>
-            )}
+    <div className="h-full overflow-y-auto pb-4">
+      <div className="mx-auto w-full max-w-4xl">
+        <div className="mb-6">
+          <h2 className="text-lg font-semibold text-white mb-1">导入本地笔记</h2>
+          <p className="text-sm text-gray-400">
+            将笔记导入知识库，与视频内容一起参与语义检索和 AI 对话
           </p>
         </div>
-        {notes.length === 0 ? (
-          <div className="text-center py-10">
-            <p className="text-4xl mb-3">📝</p>
-            <p className="text-sm text-gray-500">暂无导入的笔记</p>
-            <p className="text-xs text-gray-600 mt-1">导入后可在「知识对话」中直接引用</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {notes.map((n) => (
-              <NoteCard key={n.id} note={n} onDelete={() => handleDelete(n.id)} />
-            ))}
-          </div>
-        )}
+
+        <div className="space-y-6">
+          <section className="space-y-5">
+            {/* Drop zone */}
+            <div
+              onClick={() => !uploading && fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+              onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false) }}
+              onDrop={onDrop}
+              className={`relative flex min-h-80 flex-col items-center justify-center rounded-2xl border-2 border-dashed p-10 text-center transition-all
+                ${uploading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                ${dragging ? 'border-blue-400 bg-blue-500/10 scale-[1.01]' : 'border-gray-700 hover:border-gray-500 hover:bg-gray-800/20'}`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPTED}
+                onChange={onFileChange}
+                className="hidden"
+                disabled={uploading}
+              />
+              <div className="text-5xl mb-3 select-none">{dragging ? '⬇️' : '📂'}</div>
+              <p className="text-sm font-medium text-gray-200 mb-1">
+                {dragging ? '松开以上传' : '点击上传或拖拽文件到此处'}
+              </p>
+              <p className="text-xs text-gray-500 mb-4">支持同时上传多个文件</p>
+              <div className="flex justify-center gap-2">
+                {['MD', 'PDF', 'TXT', 'DOCX'].map((f) => (
+                  <span key={f} className="px-2.5 py-1 rounded-lg bg-gray-800 border border-gray-700 text-xs text-gray-400 font-mono">
+                    {f}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {activeTasks.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-gray-500 uppercase tracking-wide">处理中 ({activeTasks.length})</p>
+                {activeTasks.map((t) => <ProgressCard key={t.taskId} task={t} />)}
+              </div>
+            )}
+
+            {doneTasks.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">本次上传结果</p>
+                  <button onClick={clearFinished} className="text-xs text-gray-600 hover:text-gray-400">清除</button>
+                </div>
+                {doneTasks.map((t) => (
+                  <div
+                    key={t.taskId}
+                    className={`rounded-xl px-4 py-2.5 border text-sm ${
+                      t.event?.step === 'done'
+                        ? 'bg-green-900/20 border-green-800 text-green-400'
+                        : 'bg-red-900/20 border-red-800 text-red-400'
+                    }`}
+                  >
+                    <span className="mr-2">{t.event?.step === 'done' ? '✓' : '✕'}</span>
+                    <span className="truncate">{t.filename}</span>
+                    {t.event?.step === 'error' && (
+                      <span className="text-xs ml-2 opacity-70">— {t.event.message}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Notes library */}
+          <section className="min-h-80 rounded-2xl border border-gray-700 bg-gray-800/20 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-xs text-gray-500 uppercase tracking-wide">
+                笔记库
+                {notes.length > 0 && (
+                  <span className="ml-2 px-1.5 py-0.5 bg-gray-700 rounded text-gray-400">{notes.length}</span>
+                )}
+              </p>
+            </div>
+            {notes.length === 0 ? (
+              <div className="flex min-h-64 flex-col items-center justify-center text-center">
+                <p className="text-4xl mb-3">📝</p>
+                <p className="text-sm text-gray-500">暂无导入的笔记</p>
+                <p className="text-xs text-gray-600 mt-1">导入后可在「AI 对话」中直接引用</p>
+              </div>
+            ) : (
+              <div className="max-h-[calc(100vh-14rem)] space-y-2 overflow-y-auto pr-1">
+                {notes.map((n) => (
+                  <NoteCard key={n.id} note={n} onDelete={() => handleDelete(n.id)} />
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   )

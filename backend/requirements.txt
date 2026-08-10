@@ -1,4 +1,4 @@
-openai>=1.40.0
+openai>=1.75.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 yt-dlp>=2024.1.0
@@ -16,6 +16,7 @@ pypdf>=3.0.0
 reportlab>=4.0.0
 python-docx>=1.0.0
 python-multipart>=0.0.9
+PyMySQL==1.1.1
 langfuse>=2.0.0
 mcp>=1.0.0
 tavily-python>=0.5.0

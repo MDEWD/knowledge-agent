@@ -68,7 +68,7 @@ export default function VideoLibrary({ videos, onDelete, onSelectVideo, notes = 
     <div className="flex flex-col h-full gap-2">
       <div className="flex items-center justify-between shrink-0">
         <h2 className="text-sm font-semibold text-gray-300">
-          知识库 <span className="text-gray-500 font-normal">({videos.length + notes.length})</span>
+          笔记库 <span className="text-gray-500 font-normal">({videos.length + notes.length})</span>
         </h2>
         <button
           onClick={() => setSortDesc((d) => !d)}

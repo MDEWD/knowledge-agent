@@ -58,6 +58,23 @@ class ToolTurnResult:
     usage: ToolRuntimeUsage
 
 
+@dataclass(frozen=True, slots=True)
+class ResponsesToolTurnResult:
+    """One protocol-complete Responses API tool turn.
+
+    ``input_items`` contains the model output items followed immediately by one
+    ``function_call_output`` for every function call.  It can therefore be
+    appended atomically to the next stateless Responses API request.
+    ``messages`` mirrors the same turn in Chat Completions format for logging,
+    evidence compression and provider-independent checkpoints.
+    """
+
+    input_items: tuple[dict[str, Any], ...]
+    messages: tuple[dict[str, Any], ...]
+    results: tuple[ToolExecutionResult, ...]
+    usage: ToolRuntimeUsage
+
+
 class ToolRuntime:
     """Validate and execute a complete assistant function-calling turn.
 
@@ -122,6 +139,50 @@ class ToolRuntime:
 
         input_tokens, output_tokens = _extract_usage(usage)
         return ToolTurnResult(
+            messages=tuple(messages),
+            results=tuple(results),
+            usage=ToolRuntimeUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                tool_calls=len(calls),
+            ),
+        )
+
+    async def execute_response(self, response: Any) -> ResponsesToolTurnResult:
+        """Execute every function call emitted by a Responses API response.
+
+        DeepSeek's Responses endpoint is stateless, so callers must explicitly
+        return both the original output items and all matching tool outputs.
+        Keeping that assembly inside ToolRuntime prevents partial tool turns
+        from leaking into the next request.
+        """
+
+        assistant_payload, calls, response_items = _serialize_response(response)
+        messages: list[dict[str, Any]] = [assistant_payload]
+        input_items = list(response_items)
+        results: list[ToolExecutionResult] = []
+
+        for call in calls:
+            result = await self._execute_call(call)
+            results.append(result)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": result.tool_call_id,
+                    "content": result.content,
+                }
+            )
+            input_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": result.tool_call_id,
+                    "output": result.content,
+                }
+            )
+
+        input_tokens, output_tokens = _extract_usage(_field(response, "usage"))
+        return ResponsesToolTurnResult(
+            input_items=tuple(input_items),
             messages=tuple(messages),
             results=tuple(results),
             usage=ToolRuntimeUsage(
@@ -223,7 +284,12 @@ class ToolRuntime:
     async def _execute_call(self, call: dict[str, str]) -> ToolExecutionResult:
         call_id, name = call["id"], call["name"]
         await self._emit(
-            {"type": "tool_start", "tool_call_id": call_id, "tool": name}
+            {
+                "type": "tool_start",
+                "tool_call_id": call_id,
+                "tool": name,
+                "arguments": call["arguments"],
+            }
         )
         definition = self._tools.get(name)
         if definition is None:
@@ -341,6 +407,89 @@ def _content(value: Any) -> str:
         return str(value)
 
 
+def _plain(value: Any) -> Any:
+    """Convert SDK response models to JSON-compatible Python values."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _plain(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(child) for child in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _plain(model_dump(exclude_none=True))
+    if hasattr(value, "__dict__"):
+        return {
+            key: _plain(child)
+            for key, child in vars(value).items()
+            if not key.startswith("_") and child is not None
+        }
+    return value
+
+
+def _serialize_response(
+    response: Any,
+) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, Any]]]:
+    """Normalize Responses API output for execution and stateless replay."""
+
+    response_items: list[dict[str, Any]] = []
+    calls: list[dict[str, str]] = []
+    text_parts: list[str] = []
+    seen_ids: set[str] = set()
+
+    for index, raw_item in enumerate(_field(response, "output") or []):
+        item = _plain(raw_item)
+        if not isinstance(item, dict):
+            continue
+        response_items.append(item)
+        item_type = str(item.get("type", ""))
+        if item_type == "function_call":
+            call_id = str(
+                item.get("call_id") or item.get("id") or f"responses-call-{index}"
+            )
+            if call_id in seen_ids:
+                logger.warning("Ignoring duplicate Responses call_id %s", call_id)
+                continue
+            seen_ids.add(call_id)
+            calls.append(
+                {
+                    "id": call_id,
+                    "name": str(item.get("name") or ""),
+                    "arguments": str(item.get("arguments") or "{}"),
+                }
+            )
+        elif item_type == "message":
+            content = item.get("content") or []
+            if isinstance(content, str):
+                text_parts.append(content)
+            else:
+                for part in content:
+                    if isinstance(part, Mapping) and part.get("type") in {
+                        "output_text",
+                        "text",
+                    }:
+                        text_parts.append(str(part.get("text") or ""))
+
+    output_text = _field(response, "output_text")
+    content = str(output_text) if output_text else "".join(text_parts)
+    assistant_payload: dict[str, Any] = {
+        "role": "assistant",
+        "content": content,
+    }
+    if calls:
+        assistant_payload["tool_calls"] = [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                },
+            }
+            for call in calls
+        ]
+    return assistant_payload, calls, response_items
+
+
 def _extract_usage(usage: Any) -> tuple[int, int]:
     def number(*names: str) -> int:
         for name in names:
@@ -409,6 +558,7 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], path: str = "argumen
 
 
 __all__ = [
+    "ResponsesToolTurnResult",
     "ToolDefinition",
     "ToolExecutionResult",
     "ToolRuntime",

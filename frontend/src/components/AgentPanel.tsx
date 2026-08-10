@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { cancelDeepAgentRun, confirmAgentRun, deleteSkill, exportDeepResearchReport, fetchSkills, streamAgentRun, streamDeepAgentRun } from '../api/client'
-import type { DeepResearchTurn } from '../api/client'
+import {
+  cancelDeepAgentRun,
+  confirmAgentRun,
+  deleteSkill,
+  exportDeepResearchReport,
+  fetchDeepResearchSession,
+  fetchSkills,
+  saveDeepResearchSession,
+  streamAgentRun,
+  streamDeepAgentRun,
+} from '../api/client'
+import type { DeepResearchEvidence, DeepResearchTurn } from '../api/client'
 import type { AgentRunMode, AgentStep, BudgetSummary, SkillEntry } from '../types'
 
 const AGENT_META: Record<string, { icon: string; color: string; desc: string }> = {
@@ -63,19 +73,25 @@ interface DraftSnapshot {
   avg_score: number | null
 }
 
-interface ResearchSource {
-  query: string
-  title: string
-  url: string
-  snippet: string
-  status: 'found' | 'summarized'
-}
+type ResearchSource = DeepResearchEvidence
 
 interface AgentPanelProps {
   fixedMode?: AgentRunMode
+  deepSessionId?: string | null
+  deepSessionSelectionKey?: number
+  onDeepSessionSaved?: (sessionId: string) => void
+  onDeepNewSession?: () => void
+  onRunningChange?: (running: boolean) => void
 }
 
-export default function AgentPanel({ fixedMode }: AgentPanelProps) {
+export default function AgentPanel({
+  fixedMode,
+  deepSessionId = null,
+  deepSessionSelectionKey = 0,
+  onDeepSessionSaved,
+  onDeepNewSession,
+  onRunningChange,
+}: AgentPanelProps) {
   const [task, setTask]                   = useState('')
   const [mode, setMode]                   = useState<AgentRunMode>(fixedMode ?? 'quick')
   const [running, setRunning]             = useState(false)
@@ -103,6 +119,7 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
   const [brief, setBrief]                  = useState('')
   const [drafts, setDrafts]                = useState<DraftSnapshot[]>([])
   const [deepHistory, setDeepHistory]      = useState<DeepResearchTurn[]>([])
+  const [deepHistorySessionId, setDeepHistorySessionId] = useState(deepSessionId ?? '')
   const [currentQuestion, setCurrentQuestion] = useState('')
   const [followUp, setFollowUp]            = useState('')
   const [deepRunId, setDeepRunId]          = useState('')
@@ -116,15 +133,93 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
   } | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const loadedDeepSessionRef = useRef(deepSessionId ?? '')
+  const appliedSelectionKeyRef = useRef(deepSessionSelectionKey)
 
   useEffect(() => {
     fetchSkills().then((r) => setAllSkills(r.skills)).catch(() => {})
   }, [])
 
+  useEffect(() => {
+    onRunningChange?.(running)
+  }, [onRunningChange, running])
+
+  useEffect(() => {
+    if (fixedMode !== 'deep' || running) return
+    const explicitSelection = appliedSelectionKeyRef.current !== deepSessionSelectionKey
+    appliedSelectionKeyRef.current = deepSessionSelectionKey
+
+    if (!deepSessionId) {
+      if (!explicitSelection) return
+      loadedDeepSessionRef.current = ''
+      setDeepHistorySessionId('')
+      setTask('')
+      setSteps([])
+      setResult('')
+      setError('')
+      setBudget(null)
+      setRelevantSkills([])
+      setLearnedSkills([])
+      setAgentTools({})
+      setIteration(null)
+      setPhaseStatus(null)
+      setResearchSources([])
+      setCritiques([])
+      setEvalScores([])
+      setBrief('')
+      setDrafts([])
+      setDeepHistory([])
+      setCurrentQuestion('')
+      setFollowUp('')
+      setDeepRunId('')
+      setReportTitle('深度研究报告')
+      setCitationValidation(null)
+      return
+    }
+
+    if (loadedDeepSessionRef.current === deepSessionId && !explicitSelection) return
+    let cancelled = false
+    fetchDeepResearchSession(deepSessionId)
+      .then((session) => {
+        if (cancelled) return
+        const latestTurn = session.turns[session.turns.length - 1]
+        loadedDeepSessionRef.current = session.id
+        setDeepHistorySessionId(session.id)
+        setTask('')
+        setSteps([])
+        setResult(latestTurn?.answer ?? '')
+        setError('')
+        setBudget(null)
+        setRelevantSkills([])
+        setLearnedSkills([])
+        setAgentTools({})
+        setIteration(null)
+        setPhaseStatus(null)
+        setResearchSources(session.evidence ?? [])
+        setCritiques([])
+        setEvalScores([])
+        setBrief('')
+        setDrafts([])
+        setDeepHistory(session.turns)
+        setCurrentQuestion(latestTurn?.question ?? '')
+        setFollowUp('')
+        setDeepRunId(session.run_id)
+        setReportTitle(session.title)
+        setCitationValidation(null)
+      })
+      .catch((err) => {
+        if (!cancelled) setError(`加载研究记录失败：${String(err)}`)
+      })
+    return () => { cancelled = true }
+  }, [deepSessionId, deepSessionSelectionKey, fixedMode, running])
+
   const run = async (taskOverride?: string, continueConversation = false) => {
     const t = (taskOverride ?? task).trim()
     if (!t || running) return
     const selectedMode = mode
+    const sessionIdForRun = selectedMode === 'deep'
+      ? (deepHistorySessionId || crypto.randomUUID())
+      : ''
     const history = selectedMode === 'deep' && continueConversation
       ? deepHistory.slice(-3)
       : []
@@ -132,7 +227,11 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
       setDeepHistory([])
       setReportTitle(t)
     }
-    if (selectedMode === 'deep') setCurrentQuestion(t)
+    if (selectedMode === 'deep') {
+      setCurrentQuestion(t)
+      setDeepHistorySessionId(sessionIdForRun)
+      loadedDeepSessionRef.current = sessionIdForRun
+    }
     setRunning(true)
     setSteps([])
     setResult('')
@@ -154,6 +253,8 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
     if (selectedMode === 'deep') setDeepRunId('')
 
     let completedResult = ''
+    let completedRunId = ''
+    const collectedResearchSources: ResearchSource[] = []
     const controller = selectedMode === 'deep' ? new AbortController() : null
     abortControllerRef.current = controller
     const stream = selectedMode === 'deep'
@@ -210,17 +311,26 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
               (source) => source.url === event.url,
             )
             const source: ResearchSource = {
+              source_id: event.source_id,
               query: event.query,
               title: event.title,
               url: event.url,
               snippet: event.snippet,
               status: event.status,
+              published_at: event.published_at,
+              source_type: event.source_type,
+              authority_score: event.authority_score,
+              freshness_score: event.freshness_score,
             }
+            const collectedIndex = collectedResearchSources.findIndex((item) => item.url === source.url)
+            if (collectedIndex >= 0) collectedResearchSources[collectedIndex] = source
+            else collectedResearchSources.push(source)
             if (index >= 0) next[index] = source
             else next.push(source)
             return next
           })
         } else if (event.type === 'run_started' || event.type === 'run_resumed') {
+          completedRunId = event.run_id
           setDeepRunId(event.run_id)
         } else if (event.type === 'report_replace') {
           completedResult = event.content
@@ -276,10 +386,23 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
     } finally {
       if (selectedMode === 'deep' && completedResult.trim()) {
         const turn = { question: t, answer: completedResult }
-        setDeepHistory((prev) => [
-          ...(continueConversation ? prev : []),
+        const nextHistory = [
+          ...(continueConversation ? deepHistory : []),
           turn,
-        ])
+        ]
+        setDeepHistory(nextHistory)
+        try {
+          await saveDeepResearchSession({
+            id: sessionIdForRun,
+            title: continueConversation ? reportTitle : t,
+            run_id: completedRunId,
+            turns: nextHistory,
+            evidence: collectedResearchSources,
+          })
+          onDeepSessionSaved?.(sessionIdForRun)
+        } catch (historyError) {
+          console.warn('[DeepResearch] 保存研究历史失败', historyError)
+        }
       }
       if (continueConversation) setFollowUp('')
       setRunning(false)
@@ -359,11 +482,14 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
     setBrief('')
     setDrafts([])
     setDeepHistory([])
+    setDeepHistorySessionId('')
+    loadedDeepSessionRef.current = ''
     setCurrentQuestion('')
     setFollowUp('')
     setDeepRunId('')
     setReportTitle('深度研究报告')
     setCitationValidation(null)
+    onDeepNewSession?.()
   }
 
   const latestStoredTurn = deepHistory[deepHistory.length - 1]
@@ -389,14 +515,14 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-white mb-1">
+          <h2 className="text-lg font-semibold text-white">
             {mode === 'deep' ? '深度研究' : '深度分析'}
           </h2>
-          <p className="text-sm text-gray-400">
-            {mode === 'quick'
-              ? 'Research → Analysis → Writing · Agent 间协作 · HITL 确认'
-              : 'Brief → Draft → Supervisor 多步降噪 + Red Team + Evaluator 评分'}
-          </p>
+          {mode === 'quick' && (
+            <p className="mt-1 text-sm text-gray-400">
+              Research → Analysis → Writing · Agent 间协作 · HITL 确认
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {mode === 'deep' && running && (
@@ -418,8 +544,8 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
       </div>
 
       {/* Mode switch */}
-      <div className="flex items-center gap-2">
-        {!fixedMode && (
+      {!fixedMode && (
+        <div className="flex items-center gap-2">
           <div className="inline-flex rounded-lg border border-gray-700 bg-gray-800/60 p-0.5">
           <button
             onClick={() => !running && setMode('quick')}
@@ -444,13 +570,8 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
             🧬 Deep · 自进化+对抗
           </button>
           </div>
-        )}
-        {mode === 'deep' && (
-          <span className="text-[10px] text-gray-600">
-            数据源由后端 <code className="text-cyan-400">SEARCH_BACKEND</code> 决定(kb_only / web_only / hybrid)
-          </span>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Skill Library Panel */}
       {showLibrary && (
@@ -490,7 +611,7 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
           placeholder={
             mode === 'quick'
               ? '输入需要深度分析的任务,例如:「帮我分析知识库中关于投资理财的所有内容,找出核心规律并写成报告」'
-              : '输入需要深度研究的问题,例如:「Agent Memory 模块的发展方向、短期/长期机制差异、工程落地优先级」— 将走简报→初稿→多步降噪→评分→最终报告'
+              : '输入你想深入研究的问题…'
           }
           rows={3}
           disabled={running}
@@ -577,6 +698,46 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Previous turns come first so follow-ups read as a chronological conversation. */}
+      {mode === 'deep' && previousDeepTurns.length > 0 && (
+        <section
+          aria-label="历史研究记录"
+          className="rounded-xl border border-gray-700 bg-gray-800/20 px-4 py-3"
+        >
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <p className="text-xs font-medium text-gray-300">
+              研究会话记录
+            </p>
+            <span className="text-[10px] text-gray-500">
+              已完成 {previousDeepTurns.length} 轮
+            </span>
+          </div>
+          <div className="space-y-2">
+            {previousDeepTurns.map((turn, index) => (
+              <details
+                key={`${index}-${turn.question}`}
+                className="rounded-lg border border-gray-700 bg-gray-800/50 px-3 py-2"
+              >
+                <summary className="cursor-pointer select-none text-xs font-medium text-gray-300">
+                  <span className="mr-2 text-cyan-400">第 {index + 1} 轮</span>
+                  {turn.question}
+                </summary>
+                <div className="prose-custom mt-3 border-t border-gray-700 pt-3 text-sm leading-relaxed">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                    }}
+                  >
+                    {turn.answer}
+                  </ReactMarkdown>
+                </div>
+              </details>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* Execution Timeline */}
@@ -907,39 +1068,6 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
         </div>
       )}
 
-      {/* Completed DeepResearch turns stay visible while the next follow-up runs. */}
-      {mode === 'deep' && previousDeepTurns.length > 0 && (
-        <section
-          aria-label="历史研究记录"
-          className="rounded-xl border border-gray-700 bg-gray-800/20 px-4 py-3"
-        >
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <p className="text-xs font-medium text-gray-300">
-              研究会话记录
-            </p>
-            <span className="text-[10px] text-gray-500">
-              已完成 {previousDeepTurns.length} 轮
-            </span>
-          </div>
-          <div className="space-y-2">
-            {previousDeepTurns.map((turn, index) => (
-              <details
-                key={`${index}-${turn.question}`}
-                className="rounded-lg border border-gray-700 bg-gray-800/50 px-3 py-2"
-              >
-                <summary className="cursor-pointer select-none text-xs font-medium text-gray-300">
-                  <span className="mr-2 text-cyan-400">第 {index + 1} 轮</span>
-                  {turn.question}
-                </summary>
-                <div className="prose-custom mt-3 border-t border-gray-700 pt-3 text-sm leading-relaxed">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.answer}</ReactMarkdown>
-                </div>
-              </details>
-            ))}
-          </div>
-        </section>
-      )}
-
       {/* Result */}
       {result && (
         <div className={mode === 'deep' ? 'shrink-0' : 'flex-1 min-h-0'}>
@@ -975,7 +1103,14 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
           </div>
           <div className="bg-gray-800/50 rounded-xl border border-gray-700 px-5 py-4">
             <div className="prose-custom text-sm leading-relaxed">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                }}
+              >
+                {result}
+              </ReactMarkdown>
             </div>
             <div ref={bottomRef} />
           </div>
@@ -1038,20 +1173,15 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
         </div>
       )}
 
-      {!steps.length && !result && !running && !error && (
+      {mode === 'quick' && !steps.length && !result && !running && !error && (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
-            <p className="text-4xl mb-3">{mode === 'deep' ? '🧬' : '🤖'}</p>
+            <p className="text-4xl mb-3">🤖</p>
             <p className="text-sm text-gray-500">
-              {mode === 'deep'
-                ? '输入研究问题,DeepResearch 将走简报→初稿→监督降噪→最终报告'
-                : '输入复杂任务,多个 Agent 顺序协作完成深度分析'}
+              输入复杂任务,多个 Agent 顺序协作完成深度分析
             </p>
             <div className="flex justify-center gap-4 mt-4">
-              {(mode === 'quick'
-                ? ['ResearchAgent', 'AnalysisAgent', 'WritingAgent']
-                : ['BriefWriter', 'DraftWriter', 'Supervisor', 'FinalWriter']
-              ).map((name) => {
+              {['ResearchAgent', 'AnalysisAgent', 'WritingAgent'].map((name) => {
                 const meta = AGENT_META[name] ?? { icon: '🤖', desc: name }
                 return (
                   <div key={name} className="flex items-center gap-1.5 text-xs text-gray-600">
@@ -1062,9 +1192,7 @@ export default function AgentPanel({ fixedMode }: AgentPanelProps) {
               })}
             </div>
             <p className="text-xs text-gray-700 mt-3">
-              {mode === 'quick'
-                ? '分析过程中如发现知识缺口,Agent 间可互相请求补充研究'
-                : 'Supervisor 在每轮迭代后触发 Red Team 对抗 + Evaluator 三维评分,低于阈值自动续修'}
+              分析过程中如发现知识缺口,Agent 间可互相请求补充研究
             </p>
           </div>
         </div>

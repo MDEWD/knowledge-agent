@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date
 
-from agents.deep_research.citation_validator import CitationValidator
+from agents.deep_research.citation_validator import CitationValidator, ensure_clickable_sources
 from agents.deep_research.evidence import Citation, Claim, Evidence, EvidenceLedger, normalize_url
 from agents.deep_research.search_policy import SearchQualityPolicy
 
@@ -85,6 +85,69 @@ def test_validator_extracts_structured_claims_from_report():
     assert len(claims) == 1
     assert claims[0].text == "Sales increased according to SIA."
     assert claims[0].citations[0].url == "https://sia.org/report"
+
+
+def test_plain_source_basis_is_linked_to_collected_evidence():
+    source = evidence(
+        "https://www.12371.cn/2026/01/15/ARTI-example/",
+        title="全国组织部长会议专题",
+    )
+    report = """## 干部队伍建设
+
+来源依据：
+- 共产党员网：全国组织部长会议专题
+"""
+
+    linked = ensure_clickable_sources(report, [source])
+
+    assert (
+        "- [共产党员网：全国组织部长会议专题]"
+        "(https://www.12371.cn/2026/01/15/ARTI-example)"
+    ) in linked
+
+
+def test_inline_policy_basis_is_linked_in_place():
+    source = evidence(
+        "https://www.gov.cn/example/propaganda-meeting",
+        title="全国宣传部长会议在京召开 蔡奇出席并讲话",
+    )
+    report = "**政策依据：** 2026年全国宣传部长会议"
+
+    linked = ensure_clickable_sources(report, [source])
+
+    assert linked == (
+        "**政策依据：** "
+        "[2026年全国宣传部长会议]"
+        "(https://www.gov.cn/example/propaganda-meeting)"
+    )
+
+
+def test_unmentioned_evidence_is_not_appended_to_report_end():
+    source = evidence("https://example.com/report", title="权威报告")
+
+    linked = ensure_clickable_sources("# 研究报告\n\n正文。", [source])
+
+    assert linked == "# 研究报告\n\n正文。"
+
+
+def test_duplicate_trailing_reference_section_is_removed_after_inline_linking():
+    source = evidence(
+        "https://www.gov.cn/example/propaganda-meeting",
+        title="全国宣传部长会议在京召开",
+    )
+    report = """# 研究报告
+
+**政策依据：** 2026年全国宣传部长会议
+
+## 参考文献
+
+- [全国宣传部长会议在京召开](https://www.gov.cn/example/propaganda-meeting)
+"""
+
+    linked = ensure_clickable_sources(report, [source])
+
+    assert "**政策依据：** [2026年全国宣传部长会议]" in linked
+    assert "## 参考文献" not in linked
 
 
 def test_search_policy_deduplicates_queries_and_urls_globally():
