@@ -86,6 +86,16 @@ def _find_isolated_nodes() -> dict:
     return {"count": len(isolated), "items": isolated[:10]}
 
 
+def _reflect_memory() -> dict:
+    from processors.memory_reflection import run_memory_reflection
+    return run_memory_reflection(force=True)
+
+
+def _maintain_memory() -> dict:
+    from memory.runtime import MemoryRuntime
+    return MemoryRuntime().maintain()
+
+
 def run_dream_cycle() -> dict:
     """Orchestrate all maintenance tasks and write a consolidated report."""
     started_at = datetime.now().isoformat()
@@ -98,6 +108,8 @@ def run_dream_cycle() -> dict:
         ("broken_wikilinks", _scan_broken_wikilinks),
         ("contradictions", _collect_contradictions),
         ("isolated_nodes", _find_isolated_nodes),
+        ("memory_reflection", _reflect_memory),
+        ("memory_maintenance", _maintain_memory),
     ]:
         try:
             report["tasks"][task_name] = task_fn()

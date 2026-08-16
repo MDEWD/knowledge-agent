@@ -43,7 +43,7 @@ export default function AiPanel({ suggestedVideo }: Props) {
         <ChatInterface suggestedVideo={suggestedVideo} />
       </div>
       <div className={`flex-1 overflow-y-auto min-h-0 ${mode === 'agent' ? '' : 'hidden'}`}>
-        <AgentPanel />
+        <AgentPanel fixedMode="quick" />
       </div>
     </div>
   )

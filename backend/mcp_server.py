@@ -110,17 +110,6 @@ _TOOLS = [
             "required": ["query"],
         },
     ),
-    types.Tool(
-        name="generate_synthesis_article",
-        description="基于知识库中的相关内容，生成一篇系统性综合文章并保存到 Obsidian",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "topic": {"type": "string", "description": "文章主题"},
-            },
-            "required": ["topic"],
-        },
-    ),
 ]
 
 
@@ -266,16 +255,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 return _text("未找到相关视频")
             lines = [f"- 《{v['title']}》 {v['url']} 频道:{v['channel']}" for v in videos]
             return _text("\n".join(lines))
-
-        if name == "generate_synthesis_article":
-            from processors.article import generate_article
-            result = generate_article(arguments.get("topic", ""))
-            if result.get("error"):
-                return _text(f"生成失败：{result['error']}")
-            return _text(
-                f"文章已生成并保存到 Obsidian（{result.get('source_count', 0)} 个来源）\n\n"
-                f"{result.get('article', '')}"
-            )
 
         return _text(f"未知工具：{name}")
 

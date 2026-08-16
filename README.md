@@ -1,351 +1,426 @@
-# 个人视频知识库 Agent
+<div align="center">
 
-把视频链接丢进去，自动提取文案、提炼核心观点、存入向量库和 Obsidian，并支持基于知识库的 AI 对话与多 Agent 深度分析。
+# 🧭 Multi-Agent Research Workspace
 
-## 核心功能
+### 多智能体研究工作台
 
-### 知识入库（两步链式思考）
-- **多平台支持**：YouTube、Bilibili、Twitter/X、Vimeo、TikTok 等
-- **自动提取文案**：优先平台原生字幕，无字幕时自动 Whisper 语音识别兜底
-- **笔记导入**：支持导入本地 `.md` / `.txt` 文件，自动向量化入库
-- **两步链式录入**：Step 1 分析（提取实体、发现与已有知识的关联、识别矛盾）→ Step 2 生成（写带 `[[wikilink]]` 交叉引用的 Wiki 页面）
-- **自动分类归档**：AI 判断类别，写入 Obsidian 对应文件夹
-- **知识库定位（Purpose）**：`data/purpose.md` 定义知识库方向，所有录入与问答均参考此上下文
+面向复杂研究任务的 AI Agent 应用：统一承载内容采集、RAG 对话、长周期 DeepResearch、结构化证据校验与分层记忆。
 
-### 智能问答（RAG）
-- **意图感知路由**：自动识别时间型（"最近加了什么"）、实体型（"XXX讲了什么"）、概念型三类查询，走不同检索路径
-- **Multi-Query 扩展**：概念型查询自动生成 3 个语义变体，多路检索后合并去重，提升召回率
-- **混合检索**：ChromaDB 密集向量 + BM25 稀疏检索，RRF 融合排序
-- **Query Rewriting**：LLM 改写用户问题，注入知识库定位上下文
-- **显著性增强排序**：CrossEncoder × (1 + 0.2 × significance\_score)，高质量内容靠前
-- **反思机制（Reflection）**：答案生成后自动检测遗漏点，不足时触发补充搜索
-- **带引用的回答**：答案末尾附出处视频/笔记标题
-- **对话持久化**：历史消息存入 LocalStorage，切换 Tab 不丢失
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![LangGraph](https://img.shields.io/badge/LangGraph-Stateful_Agent-1C3C3C)
+![MySQL](https://img.shields.io/badge/MySQL-8.x-4479A1?logo=mysql&logoColor=white)
+![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek-4D6BFE)
 
-### Dream Cycle（后台自主维护）
-- **每日凌晨自动运行**（APScheduler 3:17 AM），无需手动触发
-- **显著性重算**：综合图谱连接数(40%) + SM-2 复习表现(30%) + 复习次数(20%) + 标签数(10%)
-- **断链扫描**：检测 Obsidian 笔记中指向不存在页面的 `[[wikilinks]]`
-- **矛盾收集**：汇总知识关联段落中被标注的矛盾观点
-- **孤立节点识别**：找出与其他内容关联稀少（degree ≤ 1）的视频
-- 报告写入 `data/dream_cycle_report.json`，可通过 API 读取
+**不是简单的聊天套壳，而是一套可规划、可检索、可验证、可恢复的多智能体研究系统。**
 
-### 知识图谱
-- **force-directed 布局**：自动排布视频节点与共享概念节点
-- **缺口检测**：识别孤立节点、意外跨类别连接，LLM 生成针对性研究建议
-- **研究缺口**：对每个知识缺口在库内搜索现有相关内容，辅助判断优先级
-- **交互**：滚轮缩放、拖拽平移、悬浮高亮关联节点
+</div>
 
-### 多 Agent 深度分析
-- **Orchestrator 并行架构**：ResearchAgent + AnalysisAgent `asyncio.gather` 并行执行，WritingAgent 汇总输出
-- **ReAct 循环**：每个子 Agent 独立的思考→工具调用→观察循环（最多 5 步）
-- **执行轨迹可视化**：前端实时展示各 Agent 状态与摘要
+---
 
-### Harness Engineering
-- **LessonStore**：每次 Agent 失败自动记录「什么错 → 根因 → 怎么改」，持久化到 `data/harness_lessons.json`，让 Agent 永不重蹈同一个错误
-- **AgentContextBuilder**：每次运行前把相关 Lesson 注入 system prompt 前缀，Agent 一开始就知道哪些坑要避开
-- **Guardrails（自修正版）**：输入输出双向安全检查，每条拦截规则携带 `Fix: ...` 自修正指令，不只是"你被拦了"而是告诉 Agent 怎么改
-- **TokenBudget**：per-run 输入/输出/工具调用次数上限，超限即中止
-- **Retry + CircuitBreaker**：指数退避抖动重试 + 三态熔断器（closed → open → half-open）
-- **Checkpoint**：Agent 运行状态原子落盘，崩溃后可从断点续跑
-- **可观测性**：LangFuse 全链路追踪（无 Key 时优雅降级为 no-op）
+## 🎯 项目介绍
 
-### Voyager 技能库
-- **自动技能提取**：成功运行后 LLM 自动从 transcript 中提炼可复用技能
-- **TF-IDF 语义检索**：新任务启动时自动召回相关技能，注入 Agent 上下文
-- **持久化管理**：技能 JSON 落盘，前端可查看/删除
+Multi-Agent Research Workspace 是一个以前端工作台为入口、FastAPI 为接入层、RAG 与 DeepResearch 为业务核心的多智能体应用。
 
-### 其他能力
-- **主动回忆（Spaced Repetition）**：SM-2 算法生成复习卡片
-- **长期记忆**：跨会话用户兴趣与知识空白画像
-- **综合文章生成**：跨视频主题文章自动撰写
-- **RAG 评测体系**：LLM-as-Judge 自动生成测试集，评测 Faithfulness / Answer Relevancy / Precision@3
-- **统计面板**：视频数量、内容时长、分类分布、高频标签、周趋势
+系统既可以把视频和本地文档转化为可检索内容，也可以针对开放问题执行长周期研究：由 Supervisor 拆解任务，调度多个 SubResearcher 并行检索，使用结构化 Evidence 约束报告生成，再通过 Red Team、Evaluator 和 Citation Validator 完成对抗审查与引用校验。
 
-## 系统架构
+当前前端包含六个工作区：
 
-```
-用户请求
-  │
-  ▼
-FastAPI (SSE 流式响应)
-  │
-  ├─ Guardrails ──── 输入安全检查（含 Fix 自修正指令）
-  ├─ TokenBudget ─── 资源限制
-  ├─ CircuitBreaker ─ 熔断保护
-  │
-  ▼
-AgentHarness（Harness Engineering 核心）
-  ├─ LessonStore ──── 失败学习：记录错误 + 根因 + 修复方案
-  ├─ AgentContext ─── 运行前注入相关 Lesson 到 system prompt
-  │
-  ▼
-OrchestratorAgent
-  ├─ ResearchAgent  ──┐
-  │  (RAG 检索)       ├── asyncio.gather 并行
-  ├─ AnalysisAgent  ──┘
-  │  (对比分析)
-  └─ WritingAgent
-     (综合报告 · 流式输出)
-  │
-  ├─ SkillExtractor ─ 提取技能 → SkillStore
-  └─ LangFuse Tracer ─ 全链路追踪
+| 工作区 | 主要能力 |
+|---|---|
+| 添加视频 | 处理 YouTube、Bilibili 及 yt-dlp 支持的视频链接，字幕缺失时使用 Whisper 兜底 |
+| 导入笔记 | 导入 Markdown、PDF、TXT、DOCX 等本地文档 |
+| 笔记 | 浏览和编辑已处理的视频笔记与导入内容 |
+| AI 对话 | 基于本地内容进行混合检索、流式回答和引用展示 |
+| 深度研究 | 多 Agent 联网研究、连续追问、历史会话、停止研究和报告导出 |
+| 统计 | 展示内容规模、分类、标签与评测信息 |
 
-知识录入链路（两步）：
-  字幕 → [Step 1] 分析（实体/关联/矛盾/缺口 → JSON）
-       → [Step 2] 生成（Wiki 页 + [[wikilinks]] + 待研究缺口）
-       → Obsidian + ChromaDB + BM25
+> README 以当前代码和产品界面为准，只描述现阶段可见、可运行的能力，不再把已经从导航下线的实验页面作为主功能展示。
 
-RAG 检索链路：
-  Query → 意图分类 → 时间型: 按 created_at 排序返回
-                   → 实体型: 单路检索
-                   → 概念型: Multi-Query 扩展(×3) → 多路搜索合并
-         → ChromaDB + BM25 (每路15) → 去重合并
-         → CrossEncoder × Significance Boost (top 6)
-         → 反思检查 → 补充搜索（可选）→ 带引用答案
+---
 
-Dream Cycle（每日 03:17）：
-  显著性重算 → 断链扫描 → 矛盾收集 → 孤立节点识别 → 报告落盘
+## ✨ 核心亮点
+
+### 1. Supervisor 驱动的长周期研究
+
+- Supervisor 是 DeepResearch 主 Agent，负责拆解目标、派发子任务、控制预算、修订报告和决定停止。
+- 15 轮是研究循环的硬上限，不要求每次跑满。
+- StopPolicy 会综合质量分、证据覆盖率、评分停滞、连续无新证据、未解决高风险 Critique 和预算状态提前结束。
+- 每轮研究状态显式写入 `ResearchState`，避免只依赖不断增长的对话消息。
+
+### 2. 结构化 Evidence 与正文级引用
+
+- 每条来源保存稳定 `source_id`、URL、标题、搜索 Query、摘要、发布时间、来源类型、权威度和新鲜度。
+- Evidence Ledger 按规范化 URL 在整个 Research Run 内全局去重，并合并不同 Query 对同一来源的发现。
+- Citation Validator 检查关键 Claim 是否由本轮 Evidence 支撑，同时移除模型生成但不在证据集中的链接。
+- 最终引用直接出现在报告正文中，用户可以点击来源进行 double check。
+
+### 3. 对抗评估与自动修订
+
+- Red Team 基于真实 Evidence 检查事实错误、引用缺失、逻辑漏洞和研究覆盖不足。
+- Evaluator 对全面性、准确性、一致性和证据覆盖率进行结构化评分。
+- Supervisor 根据 Critique 和评分选择继续搜索、修订草稿、重新规划或结束研究。
+- 高严重度 Critique 未解决时，StopPolicy 不允许正常完成。
+
+### 4. LangGraph Checkpoint 恢复
+
+- Brief、Draft、Evidence、ResearchNote、Critique、Evaluation、Usage 和 StopReason 都保存在类型化状态中。
+- `run_id` 同时作为 LangGraph `thread_id`，状态写入 SQLite Checkpoint。
+- 服务中断后，使用相同 `run_id` 可以从最近一个未完成节点继续，而不是从头重新搜索。
+- Checkpoint 恢复的是工作流状态，不是已经中断的单次 HTTP 请求。
+
+### 5. 分层记忆系统
+
+- 原始聊天和工具结果先作为 Observation，经过选择后才编码为长期 Memory Fact。
+- 长期记忆划分为 Profile、Semantic、Episodic 和 Procedural，不把所有历史直接塞进 Prompt。
+- 检索综合语义相关性、任务作用域、重要性、置信度、时间衰减和历史使用效果。
+- 新旧偏好冲突时支持版本化、自动 supersede 或进入冲突队列。
+- Reflection 将多条 Observation 提炼为稳定事实和可复用经验；普通观察和推断记忆支持 TTL 与遗忘。
+
+### 6. 面向长网页的上下文工程
+
+```text
+搜索结果
+  → Query / URL 全局去重
+  → 来源质量排序（权威度 65% + 新鲜度 35%）
+  → 网页正文有界摘要
+  → SubResearcher 独立 ReAct 上下文
+  → 子任务轨迹二次压缩
+  → Supervisor 消费压缩笔记 + Evidence Ledger
+  → Red Team / Evaluator / Citation Validator
 ```
 
-## 技术栈
+Supervisor 不直接读取所有网页全文。网页先在工具层压缩，子任务完成后再压缩为 Research Note，从而控制上下文长度并降低无关信息干扰。
 
-| 层级 | 技术 |
-|------|------|
-| 后端框架 | Python 3.11 · FastAPI · SSE 实时流 |
-| 前端 | React 18 · TypeScript · Vite · Tailwind CSS |
-| 大模型 | DeepSeek API（OpenAI 兼容格式）· 通义千问（可选） |
-| 语音识别 | OpenAI Whisper（本地 CPU 推理） |
-| 向量存储 | ChromaDB · sentence-transformers 多语言嵌入 |
-| 稀疏检索 | BM25（rank-bm25） |
-| 精排模型 | BAAI/bge-reranker-base（CrossEncoder） |
-| 可观测性 | LangFuse（cloud.langfuse.com） |
-| 笔记存储 | Obsidian Vault（本地 Markdown） |
-| 视频提取 | yt-dlp · bilibili-api-python · youtube-transcript-api |
-| 定时任务 | APScheduler（每周复盘 + 每日 Dream Cycle） |
+---
 
-## 目录结构
+## 🤖 DeepResearch Agent 流程
 
+```mermaid
+flowchart TD
+    U["用户问题 / 连续追问"] --> C["历史上下文 + 分层记忆 + Agent Skills"]
+    C --> B["BriefWriter：生成研究简报"]
+    B --> D["DraftWriter：生成报告初稿"]
+    D --> S["Supervisor：规划与主控"]
+
+    S --> P["拆分并行研究任务"]
+    P --> R1["SubResearcher 1"]
+    P --> R2["SubResearcher 2"]
+    P --> RN["SubResearcher N"]
+
+    R1 --> T["统一 ToolRuntime"]
+    R2 --> T
+    RN --> T
+    T --> DS["Tavily / 本地 RAG"]
+    DS --> E["Evidence Ledger + Compressed Notes"]
+    E --> S
+
+    S --> RT["Red Team：寻找反例与漏洞"]
+    RT --> EV["Evaluator：质量与覆盖评分"]
+    EV --> ST["Adaptive StopPolicy"]
+    ST -->|继续研究 / 修订| S
+    ST -->|质量达标或预算终止| F["FinalWriter"]
+    F --> CV["Citation Validator"]
+    CV --> O["最终报告 / Markdown / PDF"]
 ```
-.
+
+### Agent 分工
+
+项目共有 **7 类 Agent 角色**。Supervisor 是主 Agent，其余角色围绕研究生命周期协作：
+
+| Agent | 职责 | 默认模型策略 |
+|---|---|---|
+| BriefWriter | 明确目标、范围、口径和研究问题 | Flash |
+| DraftWriter | 根据研究简报生成可迭代初稿 | Flash |
+| Supervisor | 主任务规划、子任务调度、报告修订、预算与停止决策 | Flash |
+| SubResearcher | 独立执行检索、工具调用、证据整理和轨迹压缩 | Flash / Responses API |
+| Red Team | 基于 Evidence 进行事实、引用、逻辑和覆盖度审查 | Pro |
+| Evaluator | 对全面性、准确性、一致性和证据覆盖率评分 | Flash |
+| FinalWriter | 汇总草稿、证据与批评意见，生成最终报告 | Pro |
+
+LangGraph 顶层状态图为 `Brief → Draft → Supervisor → Final`。SubResearcher、Red Team 和 Evaluator 由 Supervisor 在研究循环内部动态调用，因此子 Agent 实例数会随任务变化。
+
+![DeepResearch Agent Architecture](doc/deepresearch-agent-architecture.png)
+
+---
+
+## 🔎 RAG 对话链路
+
+AI 对话使用本地内容作为主要上下文：
+
+1. 根据问题进行意图识别与 Query Rewriting。
+2. 对概念型问题生成多个语义查询。
+3. 使用 ChromaDB 密集检索和 BM25 稀疏检索召回内容。
+4. 通过 RRF 合并结果并使用 CrossEncoder 精排。
+5. 生成带来源信息的流式回答。
+6. Reflection 检查遗漏，必要时触发补充检索。
+
+RAG 负责回答本地内容问题；DeepResearch 负责处理需要任务拆解、互联网检索、证据审查和多轮修订的开放研究问题。
+
+---
+
+## 🏗️ 系统架构
+
+![System Architecture](doc/system-architecture.png)
+
+| 层级 | 组成 |
+|---|---|
+| 前端工作台 | React 18、TypeScript、Vite、Tailwind CSS、SSE 流式状态 |
+| FastAPI 接入层 | API 路由、请求校验、取消、流式响应、历史会话 |
+| RAG 业务层 | Query Rewrite、Multi-Query、ChromaDB、BM25、RRF、CrossEncoder |
+| DeepResearch 业务层 | LangGraph、Supervisor、SubResearcher、Red Team、Evaluator、FinalWriter |
+| Agent 基础设施 | ToolRuntime、ResearchBudget、Retry、CircuitBreaker、Guardrails、LangFuse |
+| 存储层 | MySQL、SQLite Checkpoint、ChromaDB、Obsidian/Markdown 文件 |
+
+### 存储职责
+
+| 存储 | 数据 |
+|---|---|
+| MySQL `multi_agent_platform` | 用户、对话、分层记忆、研究历史、Evidence、Citation |
+| SQLite | LangGraph DeepResearch Checkpoint |
+| ChromaDB + BM25 | 视频和导入文档的语义/关键词索引 |
+| Obsidian Vault / 本地文件 | 可编辑 Markdown 笔记与原始业务文件 |
+
+---
+
+## 🧰 技术栈
+
+| 类别 | 技术 |
+|---|---|
+| 后端 | Python 3.11、FastAPI、Pydantic、SSE |
+| 前端 | React 18、TypeScript、Vite、Tailwind CSS |
+| Agent | LangGraph、AsyncOpenAI、类型化 ResearchState |
+| 模型 | DeepSeek Responses API / Chat Completions，支持按角色配置模型 |
+| 联网检索 | Tavily |
+| RAG | ChromaDB、sentence-transformers、BM25、RRF、CrossEncoder |
+| 数据库 | MySQL 8.x、SQLite |
+| 内容处理 | yt-dlp、YouTube Transcript API、bilibili-api、Whisper |
+| 文档输出 | Markdown、ReportLab PDF |
+| 可观测性 | LangFuse，可无配置降级运行 |
+
+---
+
+## 📁 目录结构
+
+```text
+knowledge-agent/
 ├── backend/
-│   ├── app.py                      # FastAPI 主入口，所有 API 路由
-│   ├── config.py                   # 环境变量配置
-│   ├── requirements.txt
-│   ├── agents/                     # 多 Agent 系统
-│   │   ├── base_agent.py           # BaseAgent（ReAct 循环）
-│   │   ├── research_agent.py       # 知识库检索
-│   │   ├── analysis_agent.py       # 对比分析
-│   │   ├── writing_agent.py        # 报告撰写
-│   │   └── orchestrator.py         # 并行编排 + 流式输出
-│   ├── harness/                    # Harness Engineering 基础设施
-│   │   ├── agent_harness.py        # AgentHarness（组合所有组件，含 .default() 工厂）
-│   │   ├── lessons.py              # LessonStore：失败学习，永不重蹈同一错误
-│   │   ├── context.py              # AgentContextBuilder：运行前注入 Lesson 上下文
-│   │   ├── budget.py               # TokenBudget
-│   │   ├── checkpoint.py           # 断点续跑
-│   │   ├── guardrails.py           # 输入输出安全检查（含 Fix 自修正指令）
-│   │   └── retry.py                # RetryPolicy + CircuitBreaker
-│   ├── skills/                     # Voyager 技能库
-│   │   ├── skill_store.py          # 持久化 + TF-IDF 检索
-│   │   └── skill_extractor.py      # LLM 自动提取技能
-│   ├── evals/                      # RAG 评测体系
-│   │   ├── eval_rag.py             # LLM-as-Judge 评测指标
-│   │   └── generate_test_cases.py  # 自动生成测试集
-│   ├── observability/
-│   │   └── tracer.py               # LangFuse 封装（no-op 降级）
+│   ├── app.py                         # FastAPI 主入口
+│   ├── config.py                      # 环境变量与运行配置
+│   ├── agents/
+│   │   ├── orchestrator.py            # Quick Agent 编排
+│   │   └── deep_research/
+│   │       ├── graph_runtime.py        # LangGraph + SQLite Checkpoint
+│   │       ├── state.py                # 类型化 ResearchState
+│   │       ├── orchestrator.py         # Supervisor 主循环
+│   │       ├── sub_researcher.py       # 隔离式子研究 Agent
+│   │       ├── tool_runtime.py         # 统一工具调用协议
+│   │       ├── evidence.py             # Evidence / Claim / Citation
+│   │       ├── citation_validator.py   # 引用确定性校验
+│   │       ├── red_team.py             # 对抗审查
+│   │       ├── evaluator.py            # LLM-as-Judge 评分
+│   │       └── stop_policy.py          # 自适应停止策略
+│   ├── memory/runtime.py               # 记忆召回、冲突、版本、TTL
 │   ├── processors/
-│   │   ├── insights.py             # 两步链式知识提炼（分析→Wiki页）
-│   │   ├── rag_enhancer.py         # Multi-Query扩展 + 意图分类 + Reranking
-│   │   ├── knowledge_graph.py      # 图谱构建 + 缺口检测
-│   │   ├── purpose_manager.py      # 知识库定位文件管理
-│   │   ├── significance.py         # 显著性评分计算
-│   │   ├── dream_cycle.py          # 后台自主维护任务
-│   │   └── review.py               # 每周复盘生成
-│   ├── extractors/
-│   │   ├── youtube.py
-│   │   ├── bilibili.py
-│   │   ├── generic.py              # yt-dlp 通用提取
-│   │   └── whisper_fallback.py
-│   └── storage/
-│       ├── vector_store.py         # ChromaDB + 句子级分块
-│       ├── bm25_store.py           # BM25 稀疏索引
-│       ├── obsidian.py             # Obsidian Vault 写入
-│       └── video_db.py             # 视频元数据 + 显著性分数
-└── frontend/
-    └── src/
-        ├── components/
-        │   ├── AgentPanel.tsx       # 深度分析
-        │   ├── ChatInterface.tsx    # RAG 对话（带引用 + 反思）
-        │   ├── EvalPanel.tsx        # RAG 评测面板
-        │   ├── GraphPanel.tsx       # 知识图谱（force-directed）
-        │   ├── MemorySidebar.tsx    # 长期记忆
-        │   ├── NoteImportPanel.tsx  # 本地笔记导入
-        │   ├── RecallPanel.tsx      # 主动回忆（SM-2）
-        │   ├── ReviewPanel.tsx      # 每周复盘
-        │   ├── StatsPanel.tsx       # 统计 + 评测
-        │   └── VideoInput.tsx       # 视频提交
-        ├── api/client.ts            # 所有 API 请求
-        └── types/index.ts           # 类型定义
-skills/
-└── setup-project.md                # /setup-project：一键配置 macOS / Windows 环境
+│   │   ├── long_memory.py              # Observation → Memory 编码
+│   │   ├── memory_reflection.py        # 记忆反思与压缩
+│   │   └── rag_enhancer.py             # RAG 查询扩展与精排
+│   ├── storage/
+│   │   ├── mysql_db.py                 # MySQL 连接池
+│   │   ├── deep_research_history.py    # 研究历史与 Evidence 持久化
+│   │   ├── vector_store.py             # ChromaDB
+│   │   └── bm25_store.py               # BM25 索引
+│   ├── migrations/                     # MySQL Schema 与记忆生命周期迁移
+│   ├── agent_skills/                   # 文件型领域 Skills
+│   ├── evals/                          # RAG / Agent / DeepResearch Eval
+│   └── tests/                          # 单元与恢复性测试
+├── frontend/src/
+│   ├── App.tsx                         # 六个工作区及侧栏路由
+│   ├── components/DeepResearchPanel.tsx
+│   ├── components/DeepResearchHistorySidebar.tsx
+│   ├── components/AiPanel.tsx
+│   ├── components/NoteImportPanel.tsx
+│   └── api/client.ts
+└── doc/                                # 架构图与部署文档
 ```
 
-## 快速开始
+---
 
-### 前置条件
+## 🚀 快速开始
+
+### 环境要求
 
 - Python 3.11+
 - Node.js 18+
-- ffmpeg（Whisper 依赖）
-- [DeepSeek API Key](https://platform.deepseek.com/)
+- MySQL 8.x
+- ffmpeg
+- DeepSeek API Key
+- Tavily API Key：仅在 `SEARCH_BACKEND=web_only` 或 `hybrid` 时需要
 
-```bash
-# macOS
-brew install ffmpeg
-```
+### 1. 启动后端
 
-### 1. 后端
+Windows PowerShell：
 
-```bash
+```powershell
 cd backend
-
-python3.11 -m venv .venv
-source .venv/bin/activate
-
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-cp .env.example .env   # 编辑填入 Key
+Copy-Item .env.example .env
 ```
 
-`.env` 示例：
+编辑 `backend/.env`，最少配置：
 
 ```env
-DEEPSEEK_API_KEY=your_key
+DEEPSEEK_API_KEY=your_deepseek_api_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
-OBSIDIAN_VAULT=/path/to/vault/Videos
+DEEPSEEK_MODEL=deepseek-v4-flash
 
-# 可选：通义千问（用于模型切换）
-QWEN_API_KEY=your_key
-QWEN_MODEL=qwen-plus
+# kb_only / web_only / hybrid
+SEARCH_BACKEND=hybrid
+TAVILY_API_KEY=your_tavily_api_key
 
-# 可选：LangFuse 可观测性（不填则静默跳过）
-LANGFUSE_PUBLIC_KEY=pk-lf-xxx
-LANGFUSE_SECRET_KEY=sk-lf-xxx
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=multi_agent_platform
+MYSQL_USER=root
+MYSQL_PASSWORD=your_mysql_password
+DEFAULT_USER_ID=local-user
+MEMORY_STORAGE_BACKEND=mysql
+
+OBSIDIAN_VAULT=E:/path/to/your/vault
 ```
 
-```bash
-python app.py
-# http://localhost:8000
+初始化数据库：
+
+```powershell
+mysql -u root -p -e "source migrations/001_multi_agent_memory_schema.sql"
+.\.venv\Scripts\python.exe migrations\002_memory_lifecycle_v2.py
 ```
 
-### 2. 前端
+启动 FastAPI：
 
-```bash
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app:app --reload --port 8000
+```
+
+后端地址：`http://127.0.0.1:8000`
+
+### 2. 启动前端
+
+```powershell
 cd frontend
 npm install
 npm run dev
-# http://localhost:5173
 ```
 
-### 3. 配置知识库定位（可选但推荐）
+前端地址：`http://localhost:5173`
 
-在 `backend/data/purpose.md` 中描述你的知识库方向：
+Vite 会把 `/api` 请求代理到 `127.0.0.1:8000`，因此需要保持 FastAPI 后端运行。
 
-```markdown
-# 知识库定位
+---
 
-## 目标描述
-专注于 AI 技术、商业创业、个人成长领域的深度学习。
+## ⚙️ DeepResearch 关键配置
 
-## 关键问题
-- AI Agent 如何在实际业务中落地？
-- 创业公司如何在资源有限时高效增长？
+完整配置请参考 `backend/.env.example`。
 
-## 研究范围
-重点：AI/ML、创业方法论、个人效率
-排除：娱乐内容、新闻时事
+| 配置项 | 默认值 | 说明 |
+|---|---:|---|
+| `DEEP_RESEARCH_MAX_ITERATIONS` | `15` | Supervisor 研究循环硬上限 |
+| `DEEP_RESEARCH_MAX_CONCURRENT` | `2` | SubResearcher 最大并发数 |
+| `DEEP_RESEARCH_SUB_MAX_STEPS` | `5` | 单个 SubResearcher 最大 ReAct 步骤，不等于固定搜索次数 |
+| `DEEP_RESEARCH_MAX_TOOL_CALLS` | `200` | 单次研究工具调用预算 |
+| `DEEP_RESEARCH_LLM_TIMEOUT_SECONDS` | `120` | 单次模型请求硬超时 |
+| `TAVILY_MAX_RESULTS` | `3` | 单次 Tavily 查询返回数量 |
+| `SEARCH_BACKEND` | `kb_only` | `kb_only`、`web_only` 或 `hybrid` |
+| `MEMORY_REFLECTION_THRESHOLD` | `50` | 触发记忆 Reflection 的待处理 Observation 数量 |
+
+角色模型可以分别设置：
+
+```env
+DEEP_RESEARCH_DRAFT_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_SUPERVISOR_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RESEARCHER_MAIN_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RESEARCHER_MAIN_API=responses
+DEEP_RESEARCH_RESEARCHER_SUMMARIZER_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RESEARCHER_COMPRESSOR_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_RED_TEAM_MODEL=deepseek-v4-pro
+DEEP_RESEARCH_EVALUATOR_MODEL=deepseek-v4-flash
+DEEP_RESEARCH_WRITER_MODEL=deepseek-v4-pro
 ```
 
-或直接调用 `POST /api/purpose` 接口写入。
+不同供应商或 API 端点的模型支持范围可能不同；如果某个端点不支持所配置模型，应替换为该端点实际可用的模型名称。
 
-## API 路由
+---
+
+## 🔌 核心 API
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/process-video` | 提交视频处理（返回 task_id） |
-| GET | `/api/status/{task_id}` | SSE 进度流 |
-| GET | `/api/videos` | 视频列表 |
-| DELETE | `/api/videos/{id}` | 删除视频 |
-| POST | `/api/chat/stream` | RAG 对话（SSE 流式） |
-| POST | `/api/agent/run` | 多 Agent 深度分析（SSE 流式） |
-| GET | `/api/graph` | 知识图谱数据 |
-| POST | `/api/graph/rebuild` | 强制重建图谱 |
-| GET | `/api/graph/gaps` | 检测知识缺口 |
-| POST | `/api/graph/research-gap` | 在库内搜索某缺口的现有内容 |
-| GET | `/api/purpose` | 读取知识库定位 |
-| POST | `/api/purpose` | 更新知识库定位 |
-| GET | `/api/dream-cycle/report` | 读取最近一次 Dream Cycle 报告 |
-| POST | `/api/dream-cycle/run` | 手动触发 Dream Cycle |
-| GET | `/api/skills` | 技能库列表 |
-| DELETE | `/api/skills/{id}` | 删除技能 |
-| GET | `/api/harness/status` | 熔断器状态 |
-| POST | `/api/evals/generate` | 生成 RAG 测试集 |
-| POST | `/api/evals/run` | 运行 RAG 评测 |
-| GET | `/api/evals/results` | 最近评测结果 |
-| GET | `/api/stats` | 知识库统计 |
-| GET | `/api/memory` | 长期用户记忆 |
+|---|---|---|
+| `POST` | `/api/process-video` | 提交视频处理任务 |
+| `GET` | `/api/status/{task_id}` | 获取视频处理 SSE 进度 |
+| `POST` | `/api/notes/import` | 导入本地文档 |
+| `POST` | `/api/chat/stream` | RAG 流式对话 |
+| `GET/PUT` | `/api/chat/history` | 读取或保存聊天历史 |
+| `POST` | `/api/agent/deep-run` | 启动或恢复 DeepResearch |
+| `POST` | `/api/agent/deep-run/{run_id}/cancel` | 取消正在运行的研究 |
+| `GET` | `/api/agent/deep-history` | 获取研究会话列表 |
+| `GET/PUT/DELETE` | `/api/agent/deep-history/{session_id}` | 查询、保存或删除研究历史 |
+| `POST` | `/api/agent/deep-export` | 导出 Markdown 或 PDF |
+| `GET` | `/api/memory/search` | 任务感知记忆检索 |
+| `GET` | `/api/memory/conflicts` | 查询待处理记忆冲突 |
+| `POST` | `/api/memory/maintenance` | 执行记忆过期、衰减和维护 |
+| `GET` | `/api/stats` | 获取工作台统计信息 |
 
-## RAG 评测指标
+---
 
-系统内置 LLM-as-Judge 评测框架，无需手标数据：
+## ✅ 验证与测试
 
-| 指标 | 说明 | 目标 |
-|------|------|------|
-| Faithfulness | 回答是否忠实于检索到的上下文 | ≥ 0.80 |
-| Answer Relevancy | 回答是否切题 | ≥ 0.75 |
-| Precision@3 | 检索 top-3 命中率 | ≥ 0.70 |
+后端测试：
 
-## Harness 组件说明
-
-```
-AgentHarness（Harness Engineering）
-├─ LessonStore        # 失败学习：错误 → 根因 → Fix，持久化到 data/harness_lessons.json
-├─ AgentContextBuilder # 运行前注入相关 Lesson，Agent 开局即知哪些坑要避
-├─ Guardrails         # 正则拦截 prompt 注入 / 敏感数据，每条规则携带 Fix 指令
-├─ TokenBudget        # 输入 80k / 输出 20k / 工具调用 30 次
-├─ CircuitBreaker     # 5 次连续失败 → open，60s 后 half-open 探测
-├─ RetryPolicy        # 最多 2 次重试，指数退避 ± 15% 抖动
-└─ CheckpointStore    # JSON 落盘，data/checkpoints/
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## 常见问题
+前端类型检查与生产构建：
 
-**Q: Bilibili 视频没有字幕？**  
-A: 自动降级 Whisper，CPU 跑完整视频需几分钟，属正常。`WHISPER_MODEL=tiny` 可加速。
+```powershell
+cd frontend
+npm run build
+```
 
-**Q: LangFuse 没有 Key 怎么办？**  
-A: 不填即可，Tracer 自动切为 no-op，不影响任何功能。
+重点测试覆盖 Evidence 去重、Citation 校验、StopPolicy、ToolRuntime 消息协议、Checkpoint 恢复、预算限制和记忆冲突策略。
 
-**Q: 企业代理 / SSL 证书报错？**  
-A: 项目已内置全局 SSL 验证跳过，适配自签名证书环境。
+---
 
-**Q: CrossEncoder 首次加载很慢？**  
-A: `BAAI/bge-reranker-base` 约 280MB，首次从 HuggingFace 下载后本地缓存，后续秒级加载。
+## 📊 评估体系
 
-**Q: Harness Engineering 是什么，和运行时中间件有什么区别？**  
-A: Harness Engineering（Mitchell Hashimoto 2026 年提出）的核心是：每次 Agent 犯错，就工程化地让它永不再犯。`LessonStore` 记录每次失败的根因和 Fix，`AgentContextBuilder` 在下次运行前把相关 Lesson 注入 system prompt。运行时中间件（retry / circuit breaker / budget）只管"这次跑"，Harness Engineering 管的是"跨次学习"。
+| 评估对象 | 指标 |
+|---|---|
+| RAG | Faithfulness、Answer Relevancy、Precision@3 |
+| 报告质量 | 全面性、准确性、一致性 |
+| 证据质量 | Evidence Coverage、来源权威性、新鲜度、唯一来源数量 |
+| 引用可信度 | Claim/Citation 匹配、未知 URL、关键结论无证据 |
+| 对抗能力 | Red Team Critique 数量、严重度和解决率 |
+| 工程稳定性 | 超时、重试、熔断、取消、Checkpoint 恢复成功率 |
+| 运行成本 | 输入/输出 Token、工具调用、延迟和可选费用预算 |
 
-**Q: Lesson 存在哪里，怎么查看？**  
-A: 持久化在 `data/harness_lessons.json`，可通过 `GET /api/harness/status` 查看熔断器状态，Lesson 内容直接读 JSON 文件或扩展 API 接口。
+---
 
-**Q: Dream Cycle 什么时候运行？**  
-A: 每天凌晨 3:17 自动运行，也可调用 `POST /api/dream-cycle/run` 手动触发。报告通过 `GET /api/dream-cycle/report` 查看。
+## 🗺️ 后续演进
 
-**Q: 两步链式录入会不会更慢？**  
-A: 多一次 LLM 分析调用（约 2-3 秒），但生成的 Wiki 页质量更高，并自动与已有内容建立 `[[wikilinks]]` 关联。首次录入（库为空）时两步几乎无差异。
+- 接入登录与多租户权限，使 `user_id` 从本地默认用户升级为真实身份。
+- 为 Supervisor 增加候选动作 Look-ahead，根据预期信息增益、成本和风险选择下一步。
+- 将高质量研究轨迹用于 SFT + DPO/GRPO，训练本地 Supervisor/SubResearcher 策略模型，并通过 vLLM 部署。
+- 建设固定 DeepResearch Benchmark、人工盲测和线上回归评估。
+- 将记忆使用反馈进一步纳入规划与个性化报告生成。
 
-**Q: 知识库定位（Purpose）有什么用？**  
-A: 定义 purpose 后，录入时 LLM 会在该方向下提炼观点（而不是泛泛总结），问答时 query rewriting 也会根据方向扩展语义，显著减少跑偏回答。
+---
+
+<div align="center">
+
+**Multi-Agent Research Workspace — 让 Agent 的研究过程可追踪、结论可验证、任务可恢复。**
+
+</div>

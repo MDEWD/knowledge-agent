@@ -1,4 +1,4 @@
-import type { ProcessingEvent, Video, ChatMessage, Stats, Review, Article, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus } from '../types'
+import type { ProcessingEvent, Video, ChatMessage, ChatHistorySession, Stats, Review, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, MemoryConflict, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus } from '../types'
 
 const BASE = '/api'
 
@@ -67,24 +67,6 @@ export async function updateNote(id: string, insights: string): Promise<void> {
     body: JSON.stringify({ insights }),
   })
   if (!res.ok) throw new Error(await res.text())
-}
-
-export async function fetchArticles(): Promise<Article[]> {
-  const res = await fetch(`${BASE}/articles`)
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-export async function generateArticle(
-  topic: string,
-): Promise<{ article: string; path: string; source_count: number }> {
-  const res = await fetch(`${BASE}/generate-article`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic }),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
 }
 
 export async function generateReview(days = 7): Promise<{
@@ -245,6 +227,33 @@ export async function rebuildGraph(): Promise<KnowledgeGraph> {
 
 // ── Long-term Memory ──────────────────────────────────────────────────────────
 
+export async function fetchChatHistory(): Promise<ChatHistorySession | null> {
+  const res = await fetch(`${BASE}/chat/history`)
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json() as { session: ChatHistorySession | null }
+  return data.session
+}
+
+export async function saveChatHistory(
+  sessionId: string | null,
+  messages: ChatMessage[],
+  model: string,
+): Promise<ChatHistorySession> {
+  const res = await fetch(`${BASE}/chat/history`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, messages, model }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json() as { session: ChatHistorySession }
+  return data.session
+}
+
+export async function deleteChatHistory(sessionId: string): Promise<void> {
+  const res = await fetch(`${BASE}/chat/history/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error(await res.text())
+}
+
 export async function fetchMemory(): Promise<UserMemory> {
   const res = await fetch(`${BASE}/memory`)
   if (!res.ok) throw new Error(await res.text())
@@ -318,6 +327,151 @@ export async function* streamAgentRun(task: string): AsyncGenerator<AgentEvent> 
 
 export async function confirmAgentRun(runId: string): Promise<void> {
   await fetch(`${BASE}/agent/confirm/${runId}`, { method: 'POST' })
+}
+
+
+// ── DeepResearch mode (自进化+对抗降噪循环) ─────────────────────────────────
+
+export interface DeepResearchTurn {
+  question: string
+  answer: string
+}
+
+export interface DeepResearchEvidence {
+  source_id?: string
+  query: string
+  title: string
+  url: string
+  snippet: string
+  status: 'found' | 'summarized'
+  published_at?: string | null
+  source_type?: string
+  authority_score?: number
+  freshness_score?: number
+}
+
+export interface DeepResearchSessionSummary {
+  id: string
+  title: string
+  run_id: string
+  created_at: string
+  updated_at: string
+  turn_count: number
+}
+
+export interface DeepResearchSession {
+  id: string
+  title: string
+  run_id: string
+  turns: DeepResearchTurn[]
+  evidence: DeepResearchEvidence[]
+  created_at: string
+  updated_at: string
+}
+
+export async function* streamDeepAgentRun(
+  task: string,
+  history: DeepResearchTurn[] = [],
+  signal?: AbortSignal,
+): AsyncGenerator<AgentEvent> {
+  const res = await fetch(`${BASE}/agent/deep-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task, history }),
+    signal,
+  })
+  if (!res.ok) throw new Error(await res.text())
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      try { yield JSON.parse(line.slice(6)) as AgentEvent } catch { /* ignore */ }
+    }
+  }
+}
+
+export async function cancelDeepAgentRun(runId: string): Promise<void> {
+  const res = await fetch(`${BASE}/agent/deep-run/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+  })
+  if (!res.ok && res.status !== 404) throw new Error(await res.text())
+}
+
+export async function fetchDeepResearchHistory(): Promise<DeepResearchSessionSummary[]> {
+  const res = await fetch(`${BASE}/agent/deep-history`)
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json() as { sessions: DeepResearchSessionSummary[] }
+  return data.sessions
+}
+
+export async function fetchDeepResearchSession(sessionId: string): Promise<DeepResearchSession> {
+  const res = await fetch(`${BASE}/agent/deep-history/${encodeURIComponent(sessionId)}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function fetchMemoryConflicts(): Promise<MemoryConflict[]> {
+  const res = await fetch(`${BASE}/memory/conflicts?status=pending`)
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json() as { conflicts: MemoryConflict[] }
+  return data.conflicts
+}
+
+export async function resolveMemoryConflict(
+  conflictId: string,
+  winnerMemoryId: number,
+  reason: string,
+): Promise<void> {
+  const res = await fetch(`${BASE}/memory/conflicts/${encodeURIComponent(conflictId)}/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ winner_memory_id: winnerMemoryId, reason }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function saveDeepResearchSession(session: {
+  id: string
+  title: string
+  run_id: string
+  turns: DeepResearchTurn[]
+  evidence?: DeepResearchEvidence[]
+}): Promise<DeepResearchSession> {
+  const res = await fetch(`${BASE}/agent/deep-history/${encodeURIComponent(session.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(session),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteDeepResearchSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${BASE}/agent/deep-history/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function exportDeepResearchReport(
+  title: string,
+  content: string,
+  format: 'md' | 'pdf',
+): Promise<Blob> {
+  const res = await fetch(`${BASE}/agent/deep-export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, content, format }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.blob()
 }
 
 

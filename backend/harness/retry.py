@@ -60,8 +60,28 @@ class RetryPolicy:
 
     def is_retryable(self, exc: BaseException) -> bool:
         """Return True if the exception is worth retrying."""
-        if isinstance(exc, (TimeoutError, ConnectionError, asyncio.TimeoutError)):
-            return True
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, (TimeoutError, ConnectionError, asyncio.TimeoutError)):
+                return True
+            # Keep this module independent from OpenAI/httpx imports while still
+            # recognizing their transport wrappers and nested root causes.
+            if type(current).__name__ in {
+                "APIConnectionError",
+                "APITimeoutError",
+                "ConnectError",
+                "ConnectTimeout",
+                "ReadError",
+                "ReadTimeout",
+                "RemoteProtocolError",
+                "TransportError",
+                "WriteError",
+                "WriteTimeout",
+            }:
+                return True
+            current = current.__cause__ or current.__context__
         # openai.RateLimitError / APIStatusError carry a status_code attribute
         status = getattr(exc, "status_code", None)
         return status in self.retryable_statuses if status is not None else False
@@ -173,15 +193,17 @@ async def async_retry(
             return result
 
         except Exception as exc:
-            if circuit is not None:
-                circuit.record_failure()
-
+            retryable = policy.is_retryable(exc)
             is_last = attempt == policy.max_attempts - 1
-            if is_last or not policy.is_retryable(exc):
-                logger.error(
-                    "[retry] '%s' failed (attempt %d/%d): %s",
-                    label, attempt + 1, policy.max_attempts, exc,
-                )
+            if is_last or not retryable:
+                if circuit is not None and retryable:
+                    circuit.record_failure()
+                if _is_content_risk(exc):
+                    logger.debug("[provider content policy] '%s' rejected input", label)
+                else:
+                    log = logger.error if is_last and retryable else logger.warning
+                    prefix = "retry exhausted" if is_last and retryable else "non-retryable call"
+                    log("[%s] '%s' failed: %s", prefix, label, exc)
                 raise
 
             delay = policy.delay_for(attempt)
@@ -193,3 +215,14 @@ async def async_retry(
 
     # Unreachable — loop always returns or raises.
     raise RuntimeError(f"async_retry exhausted for '{label}'")  # pragma: no cover
+
+
+def _is_content_risk(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if "content exists risk" in str(current).casefold():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
