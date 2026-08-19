@@ -1,6 +1,5 @@
 import re
 import httpx
-from bilibili_api import video, sync
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -42,6 +41,11 @@ def _fetch_subtitle_json(sub_url: str) -> str:
 
 
 def get_transcript(url: str) -> dict:
+    # bilibili_api registers an asyncio-based atexit callback at import time.
+    # Import it only for an actual Bilibili job so unrelated API server reloads
+    # do not try to clean its network session after Uvicorn closed the loop.
+    from bilibili_api import video, sync
+
     bvid = _extract_bvid(url)
     v = video.Video(bvid=bvid)
 

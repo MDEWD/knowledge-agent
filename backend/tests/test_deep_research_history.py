@@ -1,6 +1,34 @@
 from storage import deep_research_history as history
 
 
+def test_follow_up_turn_is_appended_and_completed_without_overwriting_previous():
+    turns = [{"question": "第一轮问题", "answer": "第一轮报告"}]
+
+    pending, turn_index = history.append_pending_turn(turns, "第二轮追问")
+    completed = history.complete_turn(
+        pending,
+        turn_index,
+        question="第二轮追问",
+        answer="第二轮报告",
+    )
+
+    assert turn_index == 1
+    assert completed == [
+        {"question": "第一轮问题", "answer": "第一轮报告"},
+        {"question": "第二轮追问", "answer": "第二轮报告"},
+    ]
+
+
+def test_identical_follow_up_question_still_creates_a_new_turn():
+    turns = [{"question": "继续分析风险", "answer": "第一份报告"}]
+
+    pending, turn_index = history.append_pending_turn(turns, "继续分析风险")
+
+    assert turn_index == 1
+    assert len(pending) == 2
+    assert pending[0]["answer"] == "第一份报告"
+
+
 def test_deep_research_history_crud(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMORY_STORAGE_BACKEND", "json")
     history_file = tmp_path / "deep_research_history.json"

@@ -1,26 +1,37 @@
 import json
+import threading
 from datetime import date
-from config import DATA_PATH
+from auth.context import user_data_path
 
-_CARDS_FILE = DATA_PATH / "recall_cards.json"
+_LOCK = threading.RLock()
+
+
+def _cards_file():
+    return user_data_path("recall_cards.json")
 
 
 def _load() -> list[dict]:
-    _CARDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not _CARDS_FILE.exists():
+    cards_file = _cards_file()
+    cards_file.parent.mkdir(parents=True, exist_ok=True)
+    if not cards_file.exists():
         return []
-    return json.loads(_CARDS_FILE.read_text(encoding="utf-8"))
+    return json.loads(cards_file.read_text(encoding="utf-8"))
 
 
 def _save(cards: list[dict]) -> None:
-    _CARDS_FILE.write_text(json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8")
+    cards_file = _cards_file()
+    cards_file.parent.mkdir(parents=True, exist_ok=True)
+    temp = cards_file.with_suffix(".tmp")
+    temp.write_text(json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(cards_file)
 
 
 def add_cards(new_cards: list[dict]) -> None:
-    cards = _load()
-    existing_ids = {c["id"] for c in cards}
-    cards.extend(c for c in new_cards if c["id"] not in existing_ids)
-    _save(cards)
+    with _LOCK:
+        cards = _load()
+        existing_ids = {c["id"] for c in cards}
+        cards.extend(c for c in new_cards if c["id"] not in existing_ids)
+        _save(cards)
 
 
 def list_cards(video_id: str | None = None) -> list[dict]:
@@ -36,21 +47,23 @@ def get_due_cards(limit: int = 30) -> list[dict]:
 
 
 def update_card(card_id: str, updates: dict) -> bool:
-    cards = _load()
-    for c in cards:
-        if c["id"] == card_id:
-            c.update(updates)
-            _save(cards)
-            return True
+    with _LOCK:
+        cards = _load()
+        for c in cards:
+            if c["id"] == card_id:
+                c.update(updates)
+                _save(cards)
+                return True
     return False
 
 
 def delete_by_video(video_id: str) -> int:
-    cards = _load()
-    before = len(cards)
-    cards = [c for c in cards if c.get("video_id") != video_id]
-    _save(cards)
-    return before - len(cards)
+    with _LOCK:
+        cards = _load()
+        before = len(cards)
+        cards = [c for c in cards if c.get("video_id") != video_id]
+        _save(cards)
+        return before - len(cards)
 
 
 def get_stats() -> dict:

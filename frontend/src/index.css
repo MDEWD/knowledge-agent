@@ -43,6 +43,63 @@
 .prose-custom p {
   @apply text-sm mb-2;
 }
+
+.prose-custom .markdown-table-scroll {
+  width: 100%;
+  margin: 0.9rem 0 1.15rem;
+  overflow-x: auto;
+  border: 1px solid #475569;
+  border-radius: 0.75rem;
+  background-color: rgb(15 23 42 / 0.36);
+  box-shadow: 0 1px 2px rgb(2 8 23 / 0.16);
+}
+
+.prose-custom table {
+  width: 100%;
+  min-width: 36rem;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.prose-custom th,
+.prose-custom td {
+  padding: 0.7rem 0.85rem;
+  border-right: 1px solid #475569;
+  border-bottom: 1px solid #475569;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose-custom th:last-child,
+.prose-custom td:last-child {
+  border-right: 0;
+}
+
+.prose-custom tr:last-child td {
+  border-bottom: 0;
+}
+
+.prose-custom th {
+  background-color: rgb(30 41 59 / 0.92);
+  color: #f1f5f9;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.prose-custom tbody tr:nth-child(even) {
+  background-color: rgb(30 41 59 / 0.42);
+}
+
+.prose-custom tbody tr:hover {
+  background-color: rgb(14 116 144 / 0.18);
+}
+
+@layer components {
+  .auth-input {
+    @apply w-full rounded-xl border border-gray-700 bg-gray-900/50 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/10;
+  }
+}
 .prose-custom a,
 .prose-custom a:visited {
   color: #60a5fa;
@@ -71,6 +128,30 @@ html.light .bg-gray-800  { background-color: #f3f4f6 !important; }
 html.light .bg-gray-750  { background-color: #eaecf0 !important; }
 html.light .bg-gray-700  { background-color: #e5e7eb !important; }
 html.light .bg-gray-600  { background-color: #d1d5db !important; }
+html.light .auth-input {
+  background-color: #ffffff !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+}
+html.light .auth-input::placeholder { color: #9ca3af !important; }
+
+/* The authentication brand panel keeps its own high-contrast palette in
+   light mode instead of inheriting the global text/background overrides. */
+html.light .auth-brand-panel {
+  background-image: linear-gradient(145deg, #0e7490 0%, #155e75 48%, #1e3a8a 100%) !important;
+  border-color: rgb(255 255 255 / 0.14) !important;
+  box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.08);
+}
+html.light .auth-brand-panel .auth-brand-icon {
+  color: #ffffff !important;
+  box-shadow: 0 14px 34px rgb(8 47 73 / 0.32);
+}
+html.light .auth-brand-panel .auth-brand-eyebrow { color: #a5f3fc !important; }
+html.light .auth-brand-panel .auth-brand-title { color: #ffffff !important; }
+html.light .auth-brand-panel .auth-brand-copy { color: #dbeafe !important; }
+html.light .auth-brand-panel .auth-brand-features { color: #bfdbfe !important; }
+html.light .auth-brand-panel .auth-brand-features strong { color: #ffffff !important; }
+html.light .auth-brand-panel .auth-brand-dot { background-color: #67e8f9 !important; }
 
 /* Text */
 html.light .text-white   { color: #111827 !important; }
@@ -159,6 +240,26 @@ html.light .text-amber-400     { color: #b45309 !important; }
 html.light .text-amber-200\/80 { color: #78350f !important; }
 html.light .text-amber-400\/60 { color: #b45309 !important; }
 html.light .text-amber-400\/70 { color: #b45309 !important; }
+
+/* DeepResearch cards use semantic overrides so translucent dark-theme colors
+   remain readable on a white canvas. */
+html.light .agent-card-amber {
+  background-color: #fff7ed !important;
+  border-color: #c2410c !important;
+  color: #7c2d12 !important;
+}
+html.light .deep-brief-card {
+  background-color: #fffbeb !important;
+  border-color: #d97706 !important;
+}
+html.light .deep-brief-title { color: #78350f !important; }
+html.light .deep-brief-body { color: #451a03 !important; }
+html.light .deep-current-question {
+  background-color: #ecfeff !important;
+  border-color: #0891b2 !important;
+}
+html.light .deep-current-question .text-cyan-300 { color: #0e7490 !important; }
+html.light .deep-current-question .text-cyan-100 { color: #164e63 !important; }
 
 /* Cyan — Agent inter-collaboration card */
 html.light .bg-cyan-900\/20    { background-color: #ecfeff !important; }
@@ -271,3 +372,168 @@ html.light .prose-custom code       { background-color: #f3f4f6; color: #16a34a;
 html.light .prose-custom a,
 html.light .prose-custom a:visited  { color: #2563eb; text-decoration-color: rgb(37 99 235 / 0.45); }
 html.light .prose-custom a:hover    { color: #1d4ed8; text-decoration-color: currentColor; }
+html.light .prose-custom .markdown-table-scroll {
+  border-color: #cbd5e1;
+  background-color: #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 8px 24px rgb(15 23 42 / 0.04);
+}
+html.light .prose-custom th,
+html.light .prose-custom td         { border-color: #dbe3ec; }
+html.light .prose-custom th         { background-color: #f1f5f9; color: #0f172a; }
+html.light .prose-custom tbody tr:nth-child(even) { background-color: #f8fafc; }
+html.light .prose-custom tbody tr:hover { background-color: #ecfeff; }
+
+/* ── DeepResearch visual system ──────────────────────────────────────────────
+   Semantic classes keep execution and evaluation surfaces legible in both
+   themes instead of relying on translucent dark-theme utilities alone. */
+.agent-card,
+.deep-telemetry-card,
+.deep-red-team-card,
+.deep-iteration-card,
+.deep-citation-card,
+.deep-budget-card,
+.deep-skill-card {
+  box-shadow: 0 1px 2px rgb(2 8 23 / 0.08);
+}
+
+.deep-section-header {
+  min-height: 2.25rem;
+}
+
+.deep-collapse-button {
+  border: 1px solid rgb(71 85 105 / 0.72);
+  background-color: rgb(30 41 59 / 0.68);
+  color: #cbd5e1;
+}
+
+.deep-collapse-button:hover {
+  border-color: rgb(34 211 238 / 0.7);
+  background-color: rgb(30 41 59 / 0.92);
+  color: #ecfeff;
+}
+
+.deep-collapse-button:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+
+.deep-collapse-chevron {
+  transition: transform 180ms ease;
+}
+
+.deep-collapse-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+html.light .deep-section-title {
+  color: #334155 !important;
+}
+
+html.light .deep-section-count {
+  border-color: #dbe3ec !important;
+  background-color: #f8fafc !important;
+  color: #64748b !important;
+}
+
+html.light .deep-collapse-button {
+  border-color: #cbd5e1;
+  background-color: #ffffff;
+  color: #475569;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+}
+
+html.light .deep-collapse-button:hover {
+  border-color: #0891b2;
+  background-color: #ecfeff;
+  color: #0e7490;
+}
+
+html.light .agent-card-blue {
+  border-color: #60a5fa !important;
+  background-color: #eff6ff !important;
+  color: #1e3a8a !important;
+}
+
+html.light .agent-card-purple {
+  border-color: #a78bfa !important;
+  background-color: #f5f3ff !important;
+  color: #5b21b6 !important;
+}
+
+html.light .agent-card-green {
+  border-color: #4ade80 !important;
+  background-color: #f0fdf4 !important;
+  color: #166534 !important;
+}
+
+html.light .agent-card-cyan {
+  border-color: #22d3ee !important;
+  background-color: #ecfeff !important;
+  color: #155e75 !important;
+}
+
+html.light .agent-card-amber {
+  border-color: #fb923c !important;
+  background-color: #fff7ed !important;
+  color: #7c2d12 !important;
+}
+
+html.light .agent-card .bg-gray-950\/25 {
+  background-color: rgb(255 255 255 / 0.76) !important;
+}
+
+html.light .agent-card a {
+  color: #0369a1 !important;
+}
+
+html.light .deep-telemetry-card,
+html.light .deep-budget-card {
+  border-color: #dbe3ec !important;
+  background-color: #ffffff !important;
+  color: #334155 !important;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 8px 24px rgb(15 23 42 / 0.04);
+}
+
+html.light .deep-telemetry-card .text-gray-300,
+html.light .deep-telemetry-card .text-gray-400,
+html.light .deep-telemetry-card .text-gray-500,
+html.light .deep-budget-card .text-gray-400,
+html.light .deep-budget-card .text-gray-500 {
+  color: #475569 !important;
+}
+
+html.light .deep-eval-card .bg-gray-700 {
+  background-color: #e2e8f0 !important;
+}
+
+html.light .deep-iteration-card {
+  border-color: #67e8f9 !important;
+  background-color: #f0fdff !important;
+}
+
+html.light .deep-red-team-card {
+  border-color: #fda4af !important;
+  background-color: #fff7f8 !important;
+  box-shadow: 0 1px 2px rgb(159 18 57 / 0.06), 0 8px 24px rgb(159 18 57 / 0.04);
+}
+
+html.light .deep-red-team-title {
+  color: #be123c !important;
+}
+
+html.light .deep-red-team-item {
+  color: #881337 !important;
+}
+
+html.light .deep-red-team-index {
+  color: #e11d48 !important;
+}
+
+html.light .deep-citation-card {
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.05);
+}
+
+html.light .deep-skill-card {
+  border-color: #86efac !important;
+  background-color: #f0fdf4 !important;
+}

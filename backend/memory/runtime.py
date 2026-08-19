@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from config import (
-    DEFAULT_USER_ID,
     MEMORY_CONTEXT_MAX_CHARS,
     MEMORY_INFERRED_TTL_DAYS,
     MEMORY_OBSERVATION_TTL_DAYS,
@@ -154,8 +153,10 @@ class MemoryCandidate:
 
 
 class MemoryRuntime:
-    def __init__(self, user_id: str = DEFAULT_USER_ID) -> None:
-        self.user_id = user_id
+    def __init__(self, user_id: str | None = None) -> None:
+        from auth.context import get_current_user_id
+
+        self.user_id = user_id or get_current_user_id()
 
     def record_observation(
         self,

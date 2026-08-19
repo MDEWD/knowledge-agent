@@ -234,14 +234,25 @@ async def test_red_team_json_response_request_explicitly_mentions_json():
             raise RuntimeError(
                 "Prompt must contain the word 'json' to use json_object"
             )
-        return SimpleNamespace(
-            choices=[SimpleNamespace(
-                message=SimpleNamespace(
-                    content='{"pass": true, "critiques": []}'
+        class Stream:
+            def __init__(self):
+                self.sent = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(
+                        content='{"pass": true, "critiques": []}'
+                    ))],
+                    usage=None,
                 )
-            )],
-            usage=None,
-        )
+
+        return Stream()
 
     client = MagicMock()
     client.chat.completions.create = create
@@ -257,6 +268,7 @@ async def test_red_team_json_response_request_explicitly_mentions_json():
 
     assert findings == []
     assert captured_request["response_format"] == {"type": "json_object"}
+    assert captured_request["stream"] is True
 
 
 def test_assistant_message_preserves_reasoning_content():
@@ -303,14 +315,129 @@ async def test_write_draft_uses_plain_markdown_response():
         choices=[SimpleNamespace(message=SimpleNamespace(content="# 完整报告\n\n正文"))]
     )
     orch = DeepResearchOrchestrator(MagicMock(), "fallback-model")
-    orch._llm = AsyncMock(return_value=response)
+    response.content = response.choices[0].message.content
+    orch._llm_text = AsyncMock(return_value=response)
     orch._llm_json = AsyncMock(side_effect=AssertionError("draft must not use JSON"))
 
     draft = await orch._write_draft("研究简报")
 
     assert draft == "# 完整报告\n\n正文"
-    orch._llm.assert_awaited_once()
-    assert orch._llm.await_args.kwargs["max_tokens"] == 8192
+    orch._llm_text.assert_awaited_once()
+    assert orch._llm_text.await_args.kwargs["max_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_write_draft_falls_back_to_brief_after_transport_failure():
+    """A transient provider disconnect must not terminate the whole Research Run."""
+    from agents.deep_research.orchestrator import DeepResearchOrchestrator
+
+    orch = DeepResearchOrchestrator(MagicMock(), "fallback-model")
+    orch._llm_text = AsyncMock(side_effect=ConnectionError("proxy disconnected"))
+
+    draft = await orch._write_draft("可继续研究的结构化简报")
+
+    assert draft == "可继续研究的结构化简报"
+
+
+@pytest.mark.asyncio
+async def test_final_writer_rejects_stream_after_continuations_are_exhausted(
+    monkeypatch,
+):
+    import agents.deep_research.orchestrator as orchestrator_module
+    from agents.deep_research.orchestrator import (
+        DeepResearchOrchestrator,
+        IncompleteFinalReportError,
+    )
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS",
+        1,
+    )
+
+    class FakeStream:
+        def __aiter__(self):
+            chunks = [
+                SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content="# partial report"),
+                        finish_reason=None,
+                    )],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content=""),
+                        finish_reason="length",
+                    )],
+                    usage=None,
+                ),
+            ]
+            return self._iterate(chunks)
+
+        async def _iterate(self, chunks):
+            for chunk in chunks:
+                yield chunk
+
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=FakeStream())
+    orch = DeepResearchOrchestrator(client, "fallback-model")
+
+    with pytest.raises(IncompleteFinalReportError):
+        _ = [
+            part
+            async for part in orch._llm_stream("prompt", model="writer-model")
+        ]
+
+    assert client.chat.completions.create.await_args.kwargs["max_tokens"] == 8192
+    assert client.chat.completions.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_final_writer_continues_after_length_and_completes(monkeypatch):
+    import agents.deep_research.orchestrator as orchestrator_module
+    from agents.deep_research.orchestrator import DeepResearchOrchestrator
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS",
+        4,
+    )
+
+    class FakeStream:
+        def __init__(self, content, finish_reason):
+            self.content = content
+            self.finish_reason = finish_reason
+
+        def __aiter__(self):
+            return self._iterate()
+
+        async def _iterate(self):
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content=self.content),
+                    finish_reason=self.finish_reason,
+                )],
+                usage=None,
+            )
+
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=[
+        FakeStream("第一段", "length"),
+        FakeStream("第二段完成", "stop"),
+    ])
+    orch = DeepResearchOrchestrator(client, "fallback-model")
+
+    result = "".join([
+        part
+        async for part in orch._llm_stream("prompt", model="writer-model")
+    ])
+
+    assert result == "第一段第二段完成"
+    assert client.chat.completions.create.await_count == 2
+    continuation_messages = client.chat.completions.create.await_args.kwargs["messages"]
+    assert continuation_messages[1] == {"role": "assistant", "content": "第一段"}
+    assert "不要重复" in continuation_messages[2]["content"]
 
 
 @pytest.mark.asyncio

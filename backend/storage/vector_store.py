@@ -8,6 +8,8 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 from config import CHROMA_DB_PATH, EMBED_LOCAL_FILES_ONLY, EMBED_MODEL
+from config import DEFAULT_USER_ID
+from auth.context import get_current_user_id
 from storage import bm25_store
 
 logger = logging.getLogger(__name__)
@@ -16,6 +18,26 @@ _collection: Optional[chromadb.Collection] = None
 _client = None
 _embedding_function = None
 _init_lock = threading.Lock()
+_legacy_ownership_migrated = False
+
+
+def _assign_legacy_documents(collection: chromadb.Collection) -> None:
+    """Tag pre-auth documents as local-user exactly once."""
+    global _legacy_ownership_migrated
+    if _legacy_ownership_migrated:
+        return
+    result = collection.get(include=["metadatas"])
+    ids: list[str] = []
+    metadatas: list[dict] = []
+    for doc_id, metadata in zip(result.get("ids") or [], result.get("metadatas") or []):
+        metadata = dict(metadata or {})
+        if not metadata.get("user_id"):
+            metadata["user_id"] = DEFAULT_USER_ID
+            ids.append(doc_id)
+            metadatas.append(metadata)
+    if ids:
+        collection.update(ids=ids, metadatas=metadatas)
+    _legacy_ownership_migrated = True
 
 
 def _get_collection() -> chromadb.Collection:
@@ -39,6 +61,7 @@ def _get_collection() -> chromadb.Collection:
                 _collection = _client.get_or_create_collection(
                     "knowledge_base", embedding_function=_embedding_function
                 )
+                _assign_legacy_documents(_collection)
     return _collection
 
 
@@ -46,6 +69,7 @@ def _get_collection() -> chromadb.Collection:
 
 def add_document(insights: str, metadata: dict) -> None:
     col = _get_collection()
+    user_id = get_current_user_id()
     paras = [p.strip() for p in insights.split("\n\n") if len(p.strip()) > 40]
 
     # Add one-paragraph overlap: prefix each chunk with the tail of the previous one
@@ -58,7 +82,7 @@ def add_document(insights: str, metadata: dict) -> None:
 
     ids, docs, metas, bm25_items = [], [], [], []
     for i, chunk in enumerate(chunks):
-        doc_id = hashlib.md5(f"{metadata['url']}_{i}".encode()).hexdigest()
+        doc_id = hashlib.md5(f"{user_id}:{metadata['url']}_{i}".encode()).hexdigest()
         chunk_meta = {
             "title": metadata.get("title", ""),
             "url": metadata.get("url", ""),
@@ -66,6 +90,7 @@ def add_document(insights: str, metadata: dict) -> None:
             "platform": metadata.get("platform", ""),
             "video_id": metadata.get("id", ""),
             "chunk_index": i,
+            "user_id": user_id,
         }
         ids.append(doc_id)
         docs.append(chunk)
@@ -79,6 +104,7 @@ def add_document(insights: str, metadata: dict) -> None:
 def add_note_document(text: str, metadata: dict) -> None:
     """Index note text with sentence-aware chunking (~500 chars, 1-sentence overlap)."""
     col = _get_collection()
+    user_id = get_current_user_id()
 
     # Split on Chinese/English sentence endings
     raw = re.split(r'(?<=[。！？.!?])\s*', text)
@@ -114,7 +140,7 @@ def add_note_document(text: str, metadata: dict) -> None:
 
     ids, docs, metas, bm25_items = [], [], [], []
     for i, chunk in enumerate(chunks):
-        doc_id = hashlib.md5(f"{metadata['url']}_{i}".encode()).hexdigest()
+        doc_id = hashlib.md5(f"{user_id}:{metadata['url']}_{i}".encode()).hexdigest()
         chunk_meta = {
             "title": metadata.get("title", ""),
             "url": metadata.get("url", ""),
@@ -122,6 +148,7 @@ def add_note_document(text: str, metadata: dict) -> None:
             "platform": metadata.get("platform", ""),
             "video_id": metadata.get("id", ""),
             "chunk_index": i,
+            "user_id": user_id,
         }
         ids.append(doc_id)
         docs.append(chunk)
@@ -135,8 +162,14 @@ def add_note_document(text: str, metadata: dict) -> None:
 def delete_document(video_url: str) -> None:
     col = _get_collection()
     results = col.get(where={"url": video_url})
-    if results["ids"]:
-        col.delete(ids=results["ids"])
+    user_id = get_current_user_id()
+    ids = [
+        doc_id
+        for doc_id, metadata in zip(results.get("ids") or [], results.get("metadatas") or [])
+        if (metadata or {}).get("user_id") == user_id
+    ]
+    if ids:
+        col.delete(ids=ids)
     bm25_store.delete_by_url(video_url)
 
 
@@ -176,12 +209,17 @@ def _rrf_fuse(
 
 def search(query: str, n_results: int = 6) -> list[dict]:
     candidate_n = min(n_results * 3, 20)
+    user_id = get_current_user_id()
 
     # Dense (semantic) search
     dense_items: list[dict] = []
     try:
         col = _get_collection()
-        results = col.query(query_texts=[query], n_results=candidate_n)
+        results = col.query(
+            query_texts=[query],
+            n_results=candidate_n,
+            where={"user_id": user_id},
+        )
         for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
             dense_items.append({"content": doc, "metadata": meta})
     except Exception as exc:
@@ -224,6 +262,7 @@ def is_topic_covered(query: str, min_chunks: int = 2, max_distance: float = 1.0)
             query_texts=[query],
             n_results=min_chunks,
             include=["distances"],
+            where={"user_id": get_current_user_id()},
         )
         distances = results["distances"][0] if results["distances"] else []
         return sum(1 for d in distances if d <= max_distance) >= min_chunks
@@ -236,7 +275,11 @@ def is_topic_covered(query: str, min_chunks: int = 2, max_distance: float = 1.0)
 def find_related(video_id: str, title: str, n: int = 3) -> list[dict]:
     col = _get_collection()
     try:
-        results = col.query(query_texts=[title], n_results=min(n * 4, 20))
+        results = col.query(
+            query_texts=[title],
+            n_results=min(n * 4, 20),
+            where={"user_id": get_current_user_id()},
+        )
     except Exception:
         return []
 

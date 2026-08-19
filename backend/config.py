@@ -14,6 +14,9 @@ OBSIDIAN_VAULT_PATH = Path(
 )
 CHROMA_DB_PATH = Path(os.environ.get("CHROMA_DB_PATH", "./data/chroma_db"))
 DATA_PATH = Path(os.environ.get("DATA_PATH", "./data"))
+UVICORN_RELOAD = os.environ.get("UVICORN_RELOAD", "false").lower() in {
+    "1", "true", "yes", "on",
+}
 
 # MySQL business persistence. When a password is configured, memory/history
 # stores default to MySQL; development and tests without credentials retain the
@@ -25,6 +28,50 @@ MYSQL_USER = os.environ.get("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
 MYSQL_POOL_SIZE = int(os.environ.get("MYSQL_POOL_SIZE", "5"))
 DEFAULT_USER_ID = os.environ.get("DEFAULT_USER_ID", "local-user")
+
+# Email authentication. The development fallback keeps local setup simple, but
+# production deployments must provide a long random AUTH_SECRET_KEY.
+AUTH_SECRET_KEY = os.environ.get(
+    "AUTH_SECRET_KEY",
+    "dev-only-change-this-secret-before-production-please",
+)
+AUTH_JWT_ALGORITHM = os.environ.get("AUTH_JWT_ALGORITHM", "HS256")
+AUTH_ACCESS_TOKEN_MINUTES = int(os.environ.get("AUTH_ACCESS_TOKEN_MINUTES", "30"))
+AUTH_REFRESH_TOKEN_DAYS = int(os.environ.get("AUTH_REFRESH_TOKEN_DAYS", "14"))
+AUTH_COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+AUTH_COOKIE_SAMESITE = os.environ.get("AUTH_COOKIE_SAMESITE", "lax").lower()
+if AUTH_COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    AUTH_COOKIE_SAMESITE = "lax"
+AUTH_ACCESS_COOKIE_NAME = os.environ.get("AUTH_ACCESS_COOKIE_NAME", "agent_access")
+AUTH_REFRESH_COOKIE_NAME = os.environ.get("AUTH_REFRESH_COOKIE_NAME", "agent_refresh")
+AUTH_CODE_MINUTES = int(os.environ.get("AUTH_CODE_MINUTES", "10"))
+AUTH_CODE_RESEND_SECONDS = int(os.environ.get("AUTH_CODE_RESEND_SECONDS", "60"))
+AUTH_CODE_MAX_ATTEMPTS = int(os.environ.get("AUTH_CODE_MAX_ATTEMPTS", "5"))
+AUTH_EXPOSE_CODES = os.environ.get("AUTH_EXPOSE_CODES", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+AUTH_ADMIN_EMAILS = {
+    value.strip().lower()
+    for value in os.environ.get("AUTH_ADMIN_EMAILS", "").split(",")
+    if value.strip()
+}
+
+# SMTP is optional for local development. Without SMTP, verification codes are
+# written to the backend terminal; production deployments should configure it.
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USERNAME)
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Multi-Agent Research Workspace")
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() in {
+    "1", "true", "yes", "on",
+}
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "false").lower() in {
+    "1", "true", "yes", "on",
+}
 MEMORY_STORAGE_BACKEND = os.environ.get(
     "MEMORY_STORAGE_BACKEND",
     "mysql" if MYSQL_PASSWORD else "json",
@@ -84,8 +131,29 @@ DEEP_RESEARCH_RESEARCHER_MAIN_API = os.environ.get(
 DEEP_RESEARCH_LLM_TIMEOUT_SECONDS = float(
     os.environ.get("DEEP_RESEARCH_LLM_TIMEOUT_SECONDS", "120")
 )
+DEEP_RESEARCH_LLM_RETRY_ATTEMPTS = int(
+    os.environ.get("DEEP_RESEARCH_LLM_RETRY_ATTEMPTS", "5")
+)
+DEEP_RESEARCH_LLM_RETRY_BASE_SECONDS = float(
+    os.environ.get("DEEP_RESEARCH_LLM_RETRY_BASE_SECONDS", "1")
+)
+DEEP_RESEARCH_LLM_RETRY_MAX_SECONDS = float(
+    os.environ.get("DEEP_RESEARCH_LLM_RETRY_MAX_SECONDS", "12")
+)
+DEEP_RESEARCH_HTTP_MAX_CONNECTIONS = int(
+    os.environ.get("DEEP_RESEARCH_HTTP_MAX_CONNECTIONS", "8")
+)
+DEEP_RESEARCH_HTTP_KEEPALIVE_CONNECTIONS = int(
+    os.environ.get("DEEP_RESEARCH_HTTP_KEEPALIVE_CONNECTIONS", "0")
+)
 DEEP_RESEARCH_EVALUATOR_MAX_TOKENS = int(
     os.environ.get("DEEP_RESEARCH_EVALUATOR_MAX_TOKENS", "2048")
+)
+DEEP_RESEARCH_FINAL_MAX_TOKENS = int(
+    os.environ.get("DEEP_RESEARCH_FINAL_MAX_TOKENS", "8192")
+)
+DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS = int(
+    os.environ.get("DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS", "4")
 )
 DEEP_RESEARCH_MAX_INPUT_TOKENS = int(os.environ.get("DEEP_RESEARCH_MAX_INPUT_TOKENS", "240000000"))
 DEEP_RESEARCH_MAX_OUTPUT_TOKENS = int(os.environ.get("DEEP_RESEARCH_MAX_OUTPUT_TOKENS", "600000000"))

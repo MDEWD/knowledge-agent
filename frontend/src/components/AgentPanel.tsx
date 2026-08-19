@@ -6,14 +6,20 @@ import {
   confirmAgentRun,
   deleteSkill,
   exportDeepResearchReport,
+  fetchActiveDeepResearchRuns,
   fetchDeepResearchSession,
   fetchSkills,
-  saveDeepResearchSession,
   streamAgentRun,
   streamDeepAgentRun,
+  streamDeepAgentRunEvents,
 } from '../api/client'
 import type { DeepResearchEvidence, DeepResearchTurn } from '../api/client'
-import type { AgentRunMode, AgentStep, BudgetSummary, SkillEntry } from '../types'
+import type { AgentEvent, AgentRunMode, AgentStep, BudgetSummary, SkillEntry } from '../types'
+import {
+  hasDeepSession,
+  prepareFollowUpHistory,
+  resolveDeepSessionId,
+} from './deepSessionState'
 
 const AGENT_META: Record<string, { icon: string; color: string; desc: string }> = {
   ResearchAgent:   { icon: '🔍', color: 'blue',   desc: '知识库检索' },
@@ -28,11 +34,11 @@ const AGENT_META: Record<string, { icon: string; color: string; desc: string }> 
 }
 
 const COLOR_CLASSES: Record<string, string> = {
-  blue:   'bg-blue-900/30 border-blue-700 text-blue-300',
-  purple: 'bg-purple-900/30 border-purple-700 text-purple-300',
-  green:  'bg-green-900/30 border-green-700 text-green-300',
-  amber:  'bg-amber-900/30 border-amber-700 text-amber-300',
-  cyan:   'bg-cyan-900/30 border-cyan-700 text-cyan-300',
+  blue:   'agent-card agent-card-blue bg-blue-900/30 border-blue-700 text-blue-300',
+  purple: 'agent-card agent-card-purple bg-purple-900/30 border-purple-700 text-purple-300',
+  green:  'agent-card agent-card-green bg-green-900/30 border-green-700 text-green-300',
+  amber:  'agent-card agent-card-amber bg-amber-900/30 border-amber-700 text-amber-300',
+  cyan:   'agent-card agent-card-cyan bg-cyan-900/30 border-cyan-700 text-cyan-300',
 }
 
 interface HitlState {
@@ -118,6 +124,7 @@ export default function AgentPanel({
   const [evalScores, setEvalScores]        = useState<EvalScore[]>([])
   const [brief, setBrief]                  = useState('')
   const [drafts, setDrafts]                = useState<DraftSnapshot[]>([])
+  const [timelineExpanded, setTimelineExpanded] = useState(true)
   const [deepHistory, setDeepHistory]      = useState<DeepResearchTurn[]>([])
   const [deepHistorySessionId, setDeepHistorySessionId] = useState(deepSessionId ?? '')
   const [currentQuestion, setCurrentQuestion] = useState('')
@@ -135,6 +142,10 @@ export default function AgentPanel({
   const bottomRef = useRef<HTMLDivElement>(null)
   const loadedDeepSessionRef = useRef(deepSessionId ?? '')
   const appliedSelectionKeyRef = useRef(deepSessionSelectionKey)
+  const reconnectAttemptedRef = useRef(false)
+  const applyAgentEventRef = useRef<(event: AgentEvent) => void>(() => {})
+  const onDeepSessionSavedRef = useRef(onDeepSessionSaved)
+  onDeepSessionSavedRef.current = onDeepSessionSaved
 
   useEffect(() => {
     fetchSkills().then((r) => setAllSkills(r.skills)).catch(() => {})
@@ -168,6 +179,7 @@ export default function AgentPanel({
       setEvalScores([])
       setBrief('')
       setDrafts([])
+      setTimelineExpanded(true)
       setDeepHistory([])
       setCurrentQuestion('')
       setFollowUp('')
@@ -200,6 +212,7 @@ export default function AgentPanel({
         setEvalScores([])
         setBrief('')
         setDrafts([])
+        setTimelineExpanded(false)
         setDeepHistory(session.turns)
         setCurrentQuestion(latestTurn?.question ?? '')
         setFollowUp('')
@@ -213,15 +226,251 @@ export default function AgentPanel({
     return () => { cancelled = true }
   }, [deepSessionId, deepSessionSelectionKey, fixedMode, running])
 
+  const applyAgentEvent = (event: AgentEvent) => {
+    if (event.type === 'skills') {
+      setRelevantSkills(event.skills)
+    } else if (event.type === 'plan') {
+      setSteps(event.steps)
+    } else if (event.type === 'hitl_confirm') {
+      setHitl({ runId: event.run_id, steps: event.steps })
+    } else if (event.type === 'agent_start') {
+      setHitl(null)
+      setSteps((prev) => {
+        const exists = prev.some((step) => step.agent === event.agent)
+        if (!exists) {
+          return [...prev, { agent: event.agent, task: event.task, status: 'running' }]
+        }
+        return prev.map((step) => (
+          step.agent === event.agent
+            ? { ...step, status: 'running', task: event.task }
+            : step
+        ))
+      })
+    } else if (event.type === 'sub_agent_tool') {
+      setAgentTools((prev) => ({
+        ...prev,
+        [event.agent]: [...(prev[event.agent] ?? []), event.label],
+      }))
+    } else if (event.type === 'collaboration') {
+      setCollabEvents((prev) => [...prev, {
+        from_agent: event.from_agent,
+        to_agent: event.to_agent,
+        topic: event.topic,
+        reason: event.reason,
+      }])
+    } else if (event.type === 'agent_done') {
+      setSteps((prev) => prev.map((step) => (
+        step.agent === event.agent
+          ? { ...step, status: 'done', summary: event.summary, stop_reason: event.stop_reason }
+          : step
+      )))
+    } else if (event.type === 'iteration') {
+      setIteration({ iter: event.iter, max: event.max })
+    } else if (event.type === 'phase_status') {
+      setPhaseStatus({ phase: event.phase, label: event.label })
+    } else if (event.type === 'research_source') {
+      const source: ResearchSource = {
+        source_id: event.source_id,
+        query: event.query,
+        title: event.title,
+        url: event.url,
+        snippet: event.snippet,
+        status: event.status,
+        published_at: event.published_at,
+        source_type: event.source_type,
+        authority_score: event.authority_score,
+        freshness_score: event.freshness_score,
+      }
+      setResearchSources((prev) => {
+        const index = prev.findIndex((item) => item.url === source.url)
+        if (index < 0) return [...prev, source]
+        const next = [...prev]
+        next[index] = source
+        return next
+      })
+    } else if (event.type === 'run_attached') {
+      setDeepRunId(event.run_id)
+      setDeepHistorySessionId(event.session_id)
+      loadedDeepSessionRef.current = event.session_id
+      setCurrentQuestion(event.task)
+      setReportTitle((title) => title === '深度研究报告' ? event.task : title)
+      onDeepSessionSaved?.(event.session_id)
+    } else if (event.type === 'run_started' || event.type === 'run_resumed') {
+      setDeepRunId(event.run_id)
+    } else if (event.type === 'report_replace') {
+      setResult(event.content)
+    } else if (event.type === 'citation_validation') {
+      setCitationValidation({
+        valid: event.valid,
+        issueCount: event.issues.length,
+        evidenceCount: event.evidence_count,
+        sanitized: Boolean(event.sanitized),
+      })
+    } else if (event.type === 'research_state') {
+      setBudget(event.budget)
+    } else if (event.type === 'research_brief') {
+      setBrief(event.content)
+    } else if (event.type === 'draft_update') {
+      setDrafts((prev) => [
+        ...prev,
+        { content: event.content, iteration: event.iteration, avg_score: event.avg_score },
+      ])
+    } else if (event.type === 'eval_score') {
+      setEvalScores((prev) => [...prev, {
+        comprehensive: event.comprehensive,
+        accuracy: event.accuracy,
+        coherence: event.coherence,
+        average: event.average,
+        reason: event.reason,
+        iteration: event.iteration,
+      }])
+    } else if (event.type === 'critique') {
+      setCritiques((prev) => [...prev, {
+        author: event.author,
+        concern: event.concern,
+        iteration: event.iteration,
+      }])
+    } else if (event.type === 'text') {
+      setResult((previous) => previous + event.content)
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    } else if (event.type === 'harness') {
+      setBudget(event.budget)
+    } else if (event.type === 'skill_learned') {
+      setLearnedSkills(event.names)
+      fetchSkills().then((response) => setAllSkills(response.skills)).catch(() => {})
+    } else if (event.type === 'error') {
+      setError(event.message)
+    } else if (event.type === 'done') {
+      setPhaseStatus(null)
+    }
+  }
+  applyAgentEventRef.current = applyAgentEvent
+
+  useEffect(() => {
+    if (fixedMode !== 'deep' || reconnectAttemptedRef.current) return
+    reconnectAttemptedRef.current = true
+    let disposed = false
+    const controller = new AbortController()
+
+    const reconnect = async () => {
+      try {
+        const activeRuns = await fetchActiveDeepResearchRuns()
+        const active = activeRuns[0]
+        if (!active || disposed) return
+
+        abortControllerRef.current = controller
+        setRunning(true)
+        setTimelineExpanded(true)
+        setError('')
+        setSteps([])
+        setResult('')
+        setBudget(null)
+        setRelevantSkills([])
+        setLearnedSkills([])
+        setAgentTools({})
+        setCollabEvents([])
+        setIteration(null)
+        setPhaseStatus({ phase: 'reconnecting', label: '正在恢复研究进度…' })
+        setResearchSources([])
+        setCritiques([])
+        setEvalScores([])
+        setBrief('')
+        setDrafts([])
+        setCitationValidation(null)
+        setDeepRunId(active.run_id)
+        setDeepHistorySessionId(active.session_id)
+        loadedDeepSessionRef.current = active.session_id
+        setCurrentQuestion(active.task)
+        setReportTitle(active.task)
+        onDeepSessionSavedRef.current?.(active.session_id)
+
+        try {
+          const session = await fetchDeepResearchSession(active.session_id)
+          if (!disposed) {
+            setDeepHistory(session.turns)
+            setResearchSources(session.evidence ?? [])
+            setReportTitle(session.title)
+          }
+        } catch {
+          // The run metadata already contains enough information to reconnect.
+        }
+
+        for await (const event of streamDeepAgentRunEvents(
+          active.run_id,
+          0,
+          controller.signal,
+        )) {
+          if (disposed) return
+          applyAgentEventRef.current(event)
+        }
+
+        const session = await fetchDeepResearchSession(active.session_id)
+        if (!disposed) {
+          const latestTurn = session.turns[session.turns.length - 1]
+          setDeepHistory(session.turns)
+          setResult(latestTurn?.answer ?? '')
+          setResearchSources(session.evidence ?? [])
+          setCurrentQuestion(latestTurn?.question ?? active.task)
+          setDeepRunId(session.run_id)
+          setReportTitle(session.title)
+          onDeepSessionSavedRef.current?.(session.id)
+        }
+      } catch (err) {
+        if (!disposed && !(err instanceof DOMException && err.name === 'AbortError')) {
+          setError(`恢复研究连接失败：${String(err)}`)
+        }
+      } finally {
+        if (!disposed) {
+          setRunning(false)
+          setPhaseStatus(null)
+          abortControllerRef.current = null
+        }
+      }
+    }
+
+    void reconnect()
+    return () => {
+      disposed = true
+      controller.abort()
+    }
+  }, [fixedMode])
+
   const run = async (taskOverride?: string, continueConversation = false) => {
     const t = (taskOverride ?? task).trim()
     if (!t || running) return
     const selectedMode = mode
     const sessionIdForRun = selectedMode === 'deep'
-      ? (deepHistorySessionId || crypto.randomUUID())
+      ? resolveDeepSessionId(
+          deepHistorySessionId,
+          deepSessionId,
+          crypto.randomUUID(),
+        )
       : ''
+    let conversationHistory = deepHistory
+    if (selectedMode === 'deep' && continueConversation) {
+      conversationHistory = prepareFollowUpHistory(
+        deepHistory,
+        currentQuestion,
+        result,
+      )
+      // The persisted session is authoritative when a refresh completed after
+      // the local UI rendered. This prevents a follow-up from losing turn one.
+      try {
+        const stored = await fetchDeepResearchSession(sessionIdForRun)
+        if (stored.turns.length >= conversationHistory.length) {
+          conversationHistory = prepareFollowUpHistory(
+            stored.turns,
+            currentQuestion,
+            result,
+          )
+        }
+      } catch {
+        // The visible completed turn above is still sufficient context.
+      }
+      setDeepHistory(conversationHistory)
+    }
     const history = selectedMode === 'deep' && continueConversation
-      ? deepHistory.slice(-3)
+      ? conversationHistory.slice(-3)
       : []
     if (selectedMode === 'deep' && !continueConversation) {
       setDeepHistory([])
@@ -249,162 +498,39 @@ export default function AgentPanel({
     setEvalScores([])
     setBrief('')
     setDrafts([])
+    setTimelineExpanded(true)
     setCitationValidation(null)
     if (selectedMode === 'deep') setDeepRunId('')
 
-    let completedResult = ''
-    let completedRunId = ''
-    const collectedResearchSources: ResearchSource[] = []
     const controller = selectedMode === 'deep' ? new AbortController() : null
     abortControllerRef.current = controller
     const stream = selectedMode === 'deep'
-      ? streamDeepAgentRun(t, history, controller?.signal)
+      ? streamDeepAgentRun(t, history, sessionIdForRun, controller?.signal)
       : streamAgentRun(t)
     try {
       for await (const event of stream) {
-        if (event.type === 'skills') {
-          setRelevantSkills(event.skills)
-        } else if (event.type === 'plan') {
-          setSteps(event.steps)
-        } else if (event.type === 'hitl_confirm') {
-          setHitl({ runId: event.run_id, steps: event.steps })
-        } else if (event.type === 'agent_start') {
-          setHitl(null)
-          setSteps((prev) => {
-            // 找不到对应 step 时追加一条
-            const exists = prev.some((s) => s.agent === event.agent)
-            if (!exists) {
-              return [...prev, { agent: event.agent, task: event.task, status: 'running' }]
-            }
-            return prev.map((s) =>
-              s.agent === event.agent ? { ...s, status: 'running', task: event.task } : s,
-            )
-          })
-        } else if (event.type === 'sub_agent_tool') {
-          setAgentTools((prev) => ({
-            ...prev,
-            [event.agent]: [...(prev[event.agent] ?? []), event.label],
-          }))
-        } else if (event.type === 'collaboration') {
-          setCollabEvents((prev) => [...prev, {
-            from_agent: event.from_agent,
-            to_agent: event.to_agent,
-            topic: event.topic,
-            reason: event.reason,
-          }])
-        } else if (event.type === 'agent_done') {
-          setSteps((prev) =>
-            prev.map((s) =>
-              s.agent === event.agent
-                ? { ...s, status: 'done', summary: event.summary, stop_reason: event.stop_reason }
-                : s,
-            ),
-          )
-        } else if (event.type === 'iteration') {
-          setIteration({ iter: event.iter, max: event.max })
-        } else if (event.type === 'phase_status') {
-          setPhaseStatus({ phase: event.phase, label: event.label })
-        } else if (event.type === 'research_source') {
-          setResearchSources((prev) => {
-            const next = [...prev]
-            const index = next.findIndex(
-              (source) => source.url === event.url,
-            )
-            const source: ResearchSource = {
-              source_id: event.source_id,
-              query: event.query,
-              title: event.title,
-              url: event.url,
-              snippet: event.snippet,
-              status: event.status,
-              published_at: event.published_at,
-              source_type: event.source_type,
-              authority_score: event.authority_score,
-              freshness_score: event.freshness_score,
-            }
-            const collectedIndex = collectedResearchSources.findIndex((item) => item.url === source.url)
-            if (collectedIndex >= 0) collectedResearchSources[collectedIndex] = source
-            else collectedResearchSources.push(source)
-            if (index >= 0) next[index] = source
-            else next.push(source)
-            return next
-          })
-        } else if (event.type === 'run_started' || event.type === 'run_resumed') {
-          completedRunId = event.run_id
-          setDeepRunId(event.run_id)
-        } else if (event.type === 'report_replace') {
-          completedResult = event.content
-          setResult(event.content)
-        } else if (event.type === 'citation_validation') {
-          setCitationValidation({
-            valid: event.valid,
-            issueCount: event.issues.length,
-            evidenceCount: event.evidence_count,
-            sanitized: Boolean(event.sanitized),
-          })
-        } else if (event.type === 'research_state') {
-          setBudget(event.budget)
-        } else if (event.type === 'research_brief') {
-          setBrief(event.content)
-        } else if (event.type === 'draft_update') {
-          setDrafts((prev) => [
-            ...prev,
-            { content: event.content, iteration: event.iteration, avg_score: event.avg_score },
-          ])
-        } else if (event.type === 'eval_score') {
-          setEvalScores((prev) => [...prev, {
-            comprehensive: event.comprehensive,
-            accuracy: event.accuracy,
-            coherence: event.coherence,
-            average: event.average,
-            reason: event.reason,
-            iteration: event.iteration,
-          }])
-        } else if (event.type === 'critique') {
-          setCritiques((prev) => [...prev, {
-            author: event.author,
-            concern: event.concern,
-            iteration: event.iteration,
-          }])
-        } else if (event.type === 'text') {
-          completedResult += event.content
-          setResult((r) => r + event.content)
-          bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-        } else if (event.type === 'harness') {
-          setBudget(event.budget)
-        } else if (event.type === 'skill_learned') {
-          setLearnedSkills(event.names)
-          fetchSkills().then((r) => setAllSkills(r.skills)).catch(() => {})
-        } else if (event.type === 'error') {
-          setError(event.message)
-        } else if (event.type === 'done') {
-          setPhaseStatus(null)
-        }
+        applyAgentEventRef.current(event)
       }
     } catch (err) {
       setError(err instanceof DOMException && err.name === 'AbortError' ? '研究已取消' : String(err))
     } finally {
-      if (selectedMode === 'deep' && completedResult.trim()) {
-        const turn = { question: t, answer: completedResult }
-        const nextHistory = [
-          ...(continueConversation ? deepHistory : []),
-          turn,
-        ]
-        setDeepHistory(nextHistory)
+      if (selectedMode === 'deep') {
         try {
-          await saveDeepResearchSession({
-            id: sessionIdForRun,
-            title: continueConversation ? reportTitle : t,
-            run_id: completedRunId,
-            turns: nextHistory,
-            evidence: collectedResearchSources,
-          })
+          const session = await fetchDeepResearchSession(sessionIdForRun)
+          const latestTurn = session.turns[session.turns.length - 1]
+          setDeepHistory(session.turns)
+          setResult(latestTurn?.answer ?? '')
+          setResearchSources(session.evidence ?? [])
+          setCurrentQuestion(latestTurn?.question ?? t)
+          setDeepRunId(session.run_id)
+          setReportTitle(session.title)
           onDeepSessionSaved?.(sessionIdForRun)
         } catch (historyError) {
-          console.warn('[DeepResearch] 保存研究历史失败', historyError)
+          console.warn('[DeepResearch] 加载研究结果失败', historyError)
         }
       }
       if (continueConversation) setFollowUp('')
+      if (selectedMode === 'deep') setTimelineExpanded(false)
       setRunning(false)
       setHitl(null)
       abortControllerRef.current = null
@@ -481,6 +607,7 @@ export default function AgentPanel({
     setEvalScores([])
     setBrief('')
     setDrafts([])
+    setTimelineExpanded(true)
     setDeepHistory([])
     setDeepHistorySessionId('')
     loadedDeepSessionRef.current = ''
@@ -494,19 +621,20 @@ export default function AgentPanel({
 
   const latestStoredTurn = deepHistory[deepHistory.length - 1]
   const currentTurnIsStored = Boolean(
-    result
-    && latestStoredTurn
+    latestStoredTurn
     && latestStoredTurn.question === currentQuestion
-    && latestStoredTurn.answer === result,
+    && (latestStoredTurn.answer === result || running),
   )
   const previousDeepTurns = currentTurnIsStored
     ? deepHistory.slice(0, -1)
     : deepHistory
-  const deepSessionActive = mode === 'deep' && (
-    running
-    || Boolean(result)
-    || deepHistory.length > 0
-  )
+  const deepSessionActive = mode === 'deep' && hasDeepSession({
+    running,
+    result,
+    historyLength: deepHistory.length,
+    currentQuestion,
+    runId: deepRunId,
+  })
 
   return (
     <div className={`relative h-full min-h-0 flex flex-col gap-5 overflow-y-auto scroll-pb-36 ${
@@ -718,6 +846,7 @@ export default function AgentPanel({
             {previousDeepTurns.map((turn, index) => (
               <details
                 key={`${index}-${turn.question}`}
+                open={index === previousDeepTurns.length - 1}
                 className="rounded-lg border border-gray-700 bg-gray-800/50 px-3 py-2"
               >
                 <summary className="cursor-pointer select-none text-xs font-medium text-gray-300">
@@ -729,6 +858,11 @@ export default function AgentPanel({
                     remarkPlugins={[remarkGfm]}
                     components={{
                       a: ({ ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                      table: ({ ...props }) => (
+                        <div className="markdown-table-scroll">
+                          <table {...props} />
+                        </div>
+                      ),
                     }}
                   >
                     {turn.answer}
@@ -740,12 +874,53 @@ export default function AgentPanel({
         </section>
       )}
 
+      {mode === 'deep' && currentQuestion && (
+        <section
+          aria-label="当前研究问题"
+          className="deep-current-question rounded-xl border border-cyan-800/60 bg-cyan-900/20 px-4 py-3"
+        >
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">
+            你的问题
+          </p>
+          <p className="text-sm font-medium leading-relaxed text-cyan-100">
+            {currentQuestion}
+          </p>
+        </section>
+      )}
+
       {/* Execution Timeline */}
       {steps.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">执行轨迹</p>
-          <div className="flex flex-col gap-2">
-            {steps.map((step, i) => {
+        <section className="deep-execution-panel space-y-2" aria-label="执行轨迹">
+          <div className="deep-section-header flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <p className="deep-section-title text-xs font-medium uppercase tracking-wide text-gray-500">
+                执行轨迹
+              </p>
+              <span className="deep-section-count rounded-full border border-gray-700/70 bg-gray-800/40 px-2 py-0.5 text-[10px] text-gray-500">
+                {steps.filter((step) => step.status === 'done').length} / {steps.length} 已完成
+              </span>
+            </div>
+            <button
+              type="button"
+              className="deep-collapse-button inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors"
+              onClick={() => setTimelineExpanded((expanded) => !expanded)}
+              aria-expanded={timelineExpanded}
+              aria-controls="deep-execution-timeline"
+            >
+              <svg
+                viewBox="0 0 20 20"
+                fill="none"
+                aria-hidden="true"
+                className={`deep-collapse-chevron h-3.5 w-3.5 ${timelineExpanded ? 'is-open' : ''}`}
+              >
+                <path d="m5.75 7.5 4.25 4.25 4.25-4.25" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {timelineExpanded ? '全部收起' : '全部展开'}
+            </button>
+          </div>
+          {timelineExpanded && (
+            <div id="deep-execution-timeline" className="flex flex-col gap-2">
+              {steps.map((step, i) => {
               const meta = AGENT_META[step.agent] ?? { icon: '🤖', color: 'blue', desc: step.agent }
               const colorCls = COLOR_CLASSES[meta.color] ?? COLOR_CLASSES.blue
               const toolCalls = agentTools[step.agent] ?? []
@@ -874,9 +1049,10 @@ export default function AgentPanel({
                   </div>
                 </div>
               )
-            })}
-          </div>
-        </div>
+              })}
+            </div>
+          )}
+        </section>
       )}
 
       {/* DeepResearch telemetry: iteration / eval_score / critique */}
@@ -884,11 +1060,11 @@ export default function AgentPanel({
         <div className="space-y-3">
           {/* Research brief */}
           {brief && (
-            <details className="bg-amber-900/15 border border-amber-800/50 rounded-xl px-4 py-2.5">
-              <summary className="text-xs text-amber-300 cursor-pointer flex items-center gap-1.5">
+            <details className="deep-brief-card bg-amber-900/15 border border-amber-800/50 rounded-xl px-4 py-2.5">
+              <summary className="deep-brief-title text-xs text-amber-300 cursor-pointer flex items-center gap-1.5">
                 <span>📝</span> 研究简报 <span className="text-amber-400/50">({brief.length} 字符)</span>
               </summary>
-              <p className="text-xs text-amber-200/70 mt-2 leading-relaxed whitespace-pre-wrap">
+              <p className="deep-brief-body text-xs text-amber-200/70 mt-2 leading-relaxed whitespace-pre-wrap">
                 {brief}
               </p>
             </details>
@@ -896,7 +1072,7 @@ export default function AgentPanel({
 
           {/* Draft snapshots */}
           {drafts.length > 0 && (
-            <details className="bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-2.5">
+            <details className="deep-telemetry-card bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-2.5">
               <summary className="text-xs text-gray-400 cursor-pointer flex items-center gap-1.5">
                 <span>📄</span> 报告草稿快照 ({drafts.length})
                 {drafts.length > 0 && drafts[drafts.length - 1].avg_score !== null && (
@@ -931,7 +1107,7 @@ export default function AgentPanel({
 
           {/* Iteration progress */}
           {iteration && (
-            <div className="bg-cyan-900/15 border border-cyan-800/50 rounded-xl px-4 py-2.5">
+            <div className="deep-iteration-card bg-cyan-900/15 border border-cyan-800/50 rounded-xl px-4 py-2.5">
               <div className="flex items-center gap-3">
                 <span className="text-base">🔁</span>
                 <span className="text-xs font-semibold text-cyan-300">
@@ -955,7 +1131,7 @@ export default function AgentPanel({
 
           {/* Eval scores timeline */}
           {evalScores.length > 0 && (
-            <div className="bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-3">
+            <div className="deep-telemetry-card deep-eval-card bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-3">
               <p className="text-xs text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1.5">
                 <span>⚖️</span> LLM-as-Judge 三维评分
               </p>
@@ -1010,14 +1186,14 @@ export default function AgentPanel({
 
           {/* Red Team critiques */}
           {critiques.length > 0 && (
-            <div className="bg-rose-900/15 border border-rose-800/50 rounded-xl px-4 py-3">
-              <p className="text-xs text-rose-400 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+            <div className="deep-red-team-card bg-rose-900/15 border border-rose-800/50 rounded-xl px-4 py-3">
+              <p className="deep-red-team-title text-xs text-rose-400 uppercase tracking-wide mb-2 flex items-center gap-1.5">
                 <span>🗡️</span> Red Team 对抗反馈 ({critiques.length})
               </p>
               <div className="space-y-2">
                 {critiques.map((c, i) => (
-                  <div key={i} className="text-xs text-rose-200/80 leading-relaxed">
-                    <span className="text-rose-400 font-medium">#{c.iteration} </span>
+                  <div key={i} className="deep-red-team-item text-xs text-rose-200/80 leading-relaxed">
+                    <span className="deep-red-team-index text-rose-400 font-medium">#{c.iteration} </span>
                     {c.concern}
                   </div>
                 ))}
@@ -1028,7 +1204,7 @@ export default function AgentPanel({
       )}
 
       {citationValidation && (
-        <div className={`rounded-xl border px-4 py-2.5 text-xs ${
+        <div className={`deep-citation-card rounded-xl border px-4 py-2.5 text-xs ${
           citationValidation.valid
             ? 'bg-green-900/20 border-green-800 text-green-300'
             : 'bg-amber-900/20 border-amber-800 text-amber-300'
@@ -1041,7 +1217,7 @@ export default function AgentPanel({
 
       {/* Harness telemetry */}
       {budget && (
-        <div className="bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-2.5 flex items-center gap-4 flex-wrap">
+        <div className="deep-budget-card bg-gray-800/40 border border-gray-700 rounded-xl px-4 py-2.5 flex items-center gap-4 flex-wrap">
           <span className="text-[10px] text-gray-500 uppercase tracking-wide font-medium">Harness</span>
           <span className="text-xs text-gray-400">输入 {budget.input_tokens.toLocaleString()} tokens</span>
           <span className="text-xs text-gray-400">输出 {budget.output_tokens.toLocaleString()} tokens</span>
@@ -1054,7 +1230,7 @@ export default function AgentPanel({
 
       {/* Newly learned skills */}
       {learnedSkills.length > 0 && (
-        <div className="bg-green-900/20 border border-green-800 rounded-xl px-4 py-2.5">
+        <div className="deep-skill-card bg-green-900/20 border border-green-800 rounded-xl px-4 py-2.5">
           <p className="text-xs text-green-400">
             ✨ 学习了 {learnedSkills.length} 个新技能：{learnedSkills.join('、')}
           </p>
@@ -1076,11 +1252,6 @@ export default function AgentPanel({
               <p className="text-xs text-gray-500 uppercase tracking-wide">
                 {mode === 'deep' ? '深度研究报告' : '综合报告'}
               </p>
-              {mode === 'deep' && currentQuestion && (
-                <p className="mt-1 truncate text-sm font-medium text-gray-300" title={currentQuestion}>
-                  {currentQuestion}
-                </p>
-              )}
             </div>
             {mode === 'deep' && !running && (
               <div className="flex items-center gap-2">
@@ -1107,6 +1278,11 @@ export default function AgentPanel({
                 remarkPlugins={[remarkGfm]}
                 components={{
                   a: ({ ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                  table: ({ ...props }) => (
+                    <div className="markdown-table-scroll">
+                      <table {...props} />
+                    </div>
+                  ),
                 }}
               >
                 {result}

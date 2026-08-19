@@ -1,6 +1,125 @@
-import type { ProcessingEvent, Video, ChatMessage, ChatHistorySession, Stats, Review, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, MemoryConflict, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus } from '../types'
+import type { ProcessingEvent, Video, ChatMessage, ChatHistorySession, Stats, Review, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, MemoryConflict, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus, AuthUser, AdminUser, AuthAuditLog } from '../types'
+import { authenticatedFetch, refreshSessionRequest } from './authFetch'
 
 const BASE = '/api'
+
+async function apiPayload<T>(res: Response): Promise<T> {
+  if (res.ok) return res.json()
+  let message = '请求失败，请稍后重试'
+  try {
+    const payload = await res.json() as { detail?: string | { message?: string } }
+    if (typeof payload.detail === 'string') message = payload.detail
+    else if (payload.detail?.message) message = payload.detail.message
+  } catch {
+    // Keep the user-facing fallback when the server did not return JSON.
+  }
+  throw new Error(message)
+}
+
+async function authPayload(res: Response): Promise<{ user: AuthUser }> {
+  return apiPayload<{ user: AuthUser }>(res)
+}
+
+export interface RegistrationResult {
+  user: AuthUser
+  requires_verification: boolean
+  delivery: 'smtp' | 'console'
+  message: string
+  dev_code?: string
+}
+
+export async function registerWithEmail(
+  email: string,
+  password: string,
+  displayName: string,
+): Promise<RegistrationResult> {
+  const res = await fetch(`${BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, display_name: displayName }),
+  })
+  return apiPayload<RegistrationResult>(res)
+}
+
+export async function verifyEmailCode(email: string, code: string): Promise<AuthUser> {
+  const res = await fetch(`${BASE}/auth/verify-email`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  })
+  return (await authPayload(res)).user
+}
+
+export async function resendVerificationCode(email: string): Promise<{ message: string; dev_code?: string }> {
+  const res = await fetch(`${BASE}/auth/resend-verification`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  return apiPayload(res)
+}
+
+export async function requestPasswordReset(email: string): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/auth/forgot-password`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  return apiPayload(res)
+}
+
+export async function resetPasswordWithCode(email: string, code: string, newPassword: string): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/auth/reset-password`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code, new_password: newPassword }),
+  })
+  return apiPayload(res)
+}
+
+export async function loginWithEmail(email: string, password: string): Promise<AuthUser> {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+  return (await authPayload(res)).user
+}
+
+export async function fetchCurrentUser(): Promise<AuthUser> {
+  return (await authPayload(await fetch(`${BASE}/auth/me`))).user
+}
+
+export async function refreshAuthSession(): Promise<AuthUser> {
+  return (await refreshSessionRequest()).user
+}
+
+export async function logoutAuthSession(): Promise<void> {
+  await fetch(`${BASE}/auth/logout`, { method: 'POST' })
+}
+
+export async function fetchAdminUsers(params: { q?: string; role?: string; status?: string } = {}): Promise<{ users: AdminUser[]; total: number }> {
+  const query = new URLSearchParams()
+  if (params.q) query.set('q', params.q)
+  if (params.role) query.set('role', params.role)
+  if (params.status) query.set('status', params.status)
+  return apiPayload(await fetch(`${BASE}/admin/users?${query}`))
+}
+
+export async function updateAdminUser(userId: string, patch: { role?: string; status?: string }): Promise<AuthUser> {
+  const res = await fetch(`${BASE}/admin/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+  })
+  return (await authPayload(res)).user
+}
+
+export async function revokeAdminUserSessions(userId: string): Promise<number> {
+  const payload = await apiPayload<{ revoked: number }>(await fetch(
+    `${BASE}/admin/users/${encodeURIComponent(userId)}/revoke-sessions`, { method: 'POST' },
+  ))
+  return payload.revoked
+}
+
+export async function fetchAuthAuditLogs(): Promise<AuthAuditLog[]> {
+  const payload = await apiPayload<{ logs: AuthAuditLog[] }>(await fetch(`${BASE}/admin/audit-logs`))
+  return payload.logs
+}
 
 export async function checkDuplicate(url: string): Promise<{ duplicate: boolean; video?: Video }> {
   const res = await fetch(`${BASE}/videos/check?url=${encodeURIComponent(url)}`)
@@ -369,27 +488,28 @@ export interface DeepResearchSession {
   updated_at: string
 }
 
-export async function* streamDeepAgentRun(
-  task: string,
-  history: DeepResearchTurn[] = [],
-  signal?: AbortSignal,
+export interface ActiveDeepResearchRun {
+  run_id: string
+  session_id: string
+  task: string
+  status: string
+  started_at: string
+  last_seq: number
+}
+
+async function* readAgentEventStream(
+  res: Response,
 ): AsyncGenerator<AgentEvent> {
-  const res = await fetch(`${BASE}/agent/deep-run`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task, history }),
-    signal,
-  })
   if (!res.ok) throw new Error(await res.text())
   const reader = res.body!.getReader()
   const decoder = new TextDecoder()
-  let buf = ''
+  let buffer = ''
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const lines = buf.split('\n')
-    buf = lines.pop() ?? ''
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue
       try { yield JSON.parse(line.slice(6)) as AgentEvent } catch { /* ignore */ }
@@ -397,22 +517,57 @@ export async function* streamDeepAgentRun(
   }
 }
 
+export async function* streamDeepAgentRun(
+  task: string,
+  history: DeepResearchTurn[] = [],
+  sessionId?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<AgentEvent> {
+  const res = await authenticatedFetch(`${BASE}/agent/deep-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task, history, session_id: sessionId }),
+    signal,
+  })
+  yield* readAgentEventStream(res)
+}
+
+export async function fetchActiveDeepResearchRuns(): Promise<ActiveDeepResearchRun[]> {
+  const res = await authenticatedFetch(`${BASE}/agent/deep-runs/active`)
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json() as { runs: ActiveDeepResearchRun[] }
+  return data.runs
+}
+
+export async function* streamDeepAgentRunEvents(
+  runId: string,
+  after = 0,
+  signal?: AbortSignal,
+): AsyncGenerator<AgentEvent> {
+  const query = new URLSearchParams({ after: String(Math.max(0, after)) })
+  const res = await authenticatedFetch(
+    `${BASE}/agent/deep-run/${encodeURIComponent(runId)}/events?${query}`,
+    { signal },
+  )
+  yield* readAgentEventStream(res)
+}
+
 export async function cancelDeepAgentRun(runId: string): Promise<void> {
-  const res = await fetch(`${BASE}/agent/deep-run/${encodeURIComponent(runId)}/cancel`, {
+  const res = await authenticatedFetch(`${BASE}/agent/deep-run/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
   })
   if (!res.ok && res.status !== 404) throw new Error(await res.text())
 }
 
 export async function fetchDeepResearchHistory(): Promise<DeepResearchSessionSummary[]> {
-  const res = await fetch(`${BASE}/agent/deep-history`)
+  const res = await authenticatedFetch(`${BASE}/agent/deep-history`)
   if (!res.ok) throw new Error(await res.text())
   const data = await res.json() as { sessions: DeepResearchSessionSummary[] }
   return data.sessions
 }
 
 export async function fetchDeepResearchSession(sessionId: string): Promise<DeepResearchSession> {
-  const res = await fetch(`${BASE}/agent/deep-history/${encodeURIComponent(sessionId)}`)
+  const res = await authenticatedFetch(`${BASE}/agent/deep-history/${encodeURIComponent(sessionId)}`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -444,7 +599,7 @@ export async function saveDeepResearchSession(session: {
   turns: DeepResearchTurn[]
   evidence?: DeepResearchEvidence[]
 }): Promise<DeepResearchSession> {
-  const res = await fetch(`${BASE}/agent/deep-history/${encodeURIComponent(session.id)}`, {
+  const res = await authenticatedFetch(`${BASE}/agent/deep-history/${encodeURIComponent(session.id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(session),
@@ -454,7 +609,7 @@ export async function saveDeepResearchSession(session: {
 }
 
 export async function deleteDeepResearchSession(sessionId: string): Promise<void> {
-  const res = await fetch(`${BASE}/agent/deep-history/${encodeURIComponent(sessionId)}`, {
+  const res = await authenticatedFetch(`${BASE}/agent/deep-history/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error(await res.text())
@@ -465,7 +620,7 @@ export async function exportDeepResearchReport(
   content: string,
   format: 'md' | 'pdf',
 ): Promise<Blob> {
-  const res = await fetch(`${BASE}/agent/deep-export`, {
+  const res = await authenticatedFetch(`${BASE}/agent/deep-export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, content, format }),

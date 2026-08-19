@@ -2,12 +2,20 @@ import re
 from datetime import datetime
 from pathlib import Path
 from config import OBSIDIAN_VAULT_PATH
+from auth.context import get_current_user_id, user_storage_key
 from processors.insights import parse_category
+
+
+def get_user_vault_root() -> Path:
+    user_id = get_current_user_id()
+    if user_id == "local-user":
+        return OBSIDIAN_VAULT_PATH
+    return OBSIDIAN_VAULT_PATH / "users" / user_storage_key(user_id)
 
 
 def save_to_obsidian(insights: str, metadata: dict, transcript: str = "", original_transcript: str = "") -> Path:
     category = parse_category(insights)
-    category_dir = OBSIDIAN_VAULT_PATH / category
+    category_dir = get_user_vault_root() / category
     category_dir.mkdir(parents=True, exist_ok=True)
 
     title = metadata.get("title", "untitled")
@@ -21,7 +29,10 @@ def save_to_obsidian(insights: str, metadata: dict, transcript: str = "", origin
 
 
 def update_obsidian_note(obsidian_path: str, title: str, transcript: str, new_insights: str) -> None:
-    path = Path(obsidian_path)
+    path = Path(obsidian_path).resolve()
+    root = get_user_vault_root().resolve()
+    if path != root and root not in path.parents:
+        raise PermissionError("note path is outside the current user's vault")
     if not path.exists():
         return
     content = path.read_text(encoding="utf-8")

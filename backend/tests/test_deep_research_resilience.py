@@ -10,7 +10,10 @@ from openai import APIConnectionError
 
 from agents.deep_research.sub_researcher import SubResearcher
 from agents.deep_research.orchestrator import DeepResearchOrchestrator
-from agents.deep_research.model_runtime import apply_role_options
+from agents.deep_research.model_runtime import (
+    apply_role_options,
+    collect_streamed_text_completion,
+)
 from harness.retry import CircuitBreaker, RetryPolicy, async_retry
 
 
@@ -28,6 +31,96 @@ def test_only_red_team_keeps_thinking_enabled():
     assert red["reasoning_effort"] == "high"
     assert writer["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "reasoning_effort" not in writer
+
+
+@pytest.mark.asyncio
+async def test_collect_streamed_text_completion_uses_sse_and_collects_usage():
+    class FakeStream:
+        def __init__(self):
+            self._chunks = iter([
+                SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="first"))],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content=" second"))],
+                    usage=SimpleNamespace(prompt_tokens=11, completion_tokens=2),
+                ),
+            ])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._chunks)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    create = AsyncMock(return_value=FakeStream())
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    result = await collect_streamed_text_completion(
+        client,
+        {"model": "deepseek-v4-flash", "messages": []},
+        timeout_seconds=1,
+    )
+
+    assert result.content == "first second"
+    assert result.input_tokens == 11
+    assert result.output_tokens == 2
+    assert create.await_args.kwargs["stream"] is True
+    assert create.await_args.kwargs["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_stream_interruption_retries_from_a_clean_response():
+    class Stream:
+        def __init__(self, chunks, error=None):
+            self.chunks = list(chunks)
+            self.error = error
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.chunks:
+                return self.chunks.pop(0)
+            if self.error is not None:
+                error, self.error = self.error, None
+                raise error
+            raise StopAsyncIteration
+
+    def chunk(text, usage=None):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=text))],
+            usage=usage,
+        )
+
+    interrupted = Stream(
+        [chunk("discarded partial")],
+        httpx.RemoteProtocolError("incomplete chunked read"),
+    )
+    completed = Stream([
+        chunk("complete response"),
+        chunk("", SimpleNamespace(prompt_tokens=7, completion_tokens=2)),
+    ])
+    create = AsyncMock(side_effect=[interrupted, completed])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    orchestrator = DeepResearchOrchestrator(
+        client,
+        "deepseek-v4-flash",
+        policy=RetryPolicy(max_attempts=2, base_delay=0, jitter=0),
+    )
+
+    result = await orchestrator._llm_text(
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "write"}],
+        _role="draft_writer",
+    )
+
+    assert result.content == "complete response"
+    assert create.await_count == 2
 
 
 @pytest.mark.asyncio

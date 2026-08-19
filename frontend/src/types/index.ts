@@ -1,3 +1,28 @@
+export interface AuthUser {
+  id: string
+  email: string
+  display_name: string
+  role: 'user' | 'admin'
+  status: 'active' | 'pending' | 'suspended'
+  email_verified: boolean
+  created_at?: string | null
+}
+
+export interface AdminUser extends AuthUser {
+  session_count: number
+  last_seen_at?: string | null
+}
+
+export interface AuthAuditLog {
+  id: number
+  action: string
+  actor_email?: string | null
+  target_email?: string | null
+  ip_address?: string | null
+  details: Record<string, unknown>
+  created_at: string
+}
+
 export interface Video {
   id: string
   title: string
@@ -96,7 +121,7 @@ export interface Review {
   content: string
 }
 
-export type ActiveTab = 'add' | 'import' | 'ai' | 'note' | 'stats' | 'deep'
+export type ActiveTab = 'add' | 'import' | 'ai' | 'note' | 'stats' | 'deep' | 'admin'
 
 // ── Multi-Agent Orchestrator ──────────────────────────────────────────────────
 
@@ -131,6 +156,8 @@ export type AgentEvent =
   | { type: 'eval_score'; comprehensive: number; accuracy: number; coherence: number; average: number; reason: string; iteration: number }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_resumed'; run_id: string; phase: string }
+  | { type: 'run_attached'; run_id: string; session_id: string; task: string; status: string }
+  | { type: 'ping' }
   | { type: 'stop_decision'; reason: string; detail: string; forced: boolean }
   | { type: 'citation_validation'; valid: boolean; issues: { code: string; message: string; url?: string }[]; evidence_count: number; sanitized?: boolean }
   | { type: 'report_replace'; content: string }

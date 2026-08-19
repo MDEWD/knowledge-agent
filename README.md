@@ -4,7 +4,7 @@
 
 ### 多智能体研究工作台
 
-面向复杂研究任务的 AI Agent 应用：统一承载内容采集、RAG 对话、长周期 DeepResearch、结构化证据校验与分层记忆。
+面向复杂研究任务的 AI Agent 应用：统一承载邮箱身份认证、内容采集、RAG 对话、长周期 DeepResearch、结构化证据校验与分层记忆。
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
@@ -24,6 +24,8 @@
 Multi-Agent Research Workspace 是一个以前端工作台为入口、FastAPI 为接入层、RAG 与 DeepResearch 为业务核心的多智能体应用。
 
 系统既可以把视频和本地文档转化为可检索内容，也可以针对开放问题执行长周期研究：由 Supervisor 拆解任务，调度多个 SubResearcher 并行检索，使用结构化 Evidence 约束报告生成，再通过 Red Team、Evaluator 和 Citation Validator 完成对抗审查与引用校验。
+
+系统内置邮箱注册、验证码验证、登录与密码找回，使用短期 Access Token、可轮换 Refresh Token 与 HttpOnly Cookie 维护会话。视频、笔记、向量索引、聊天、记忆、研究历史和 Checkpoint 均按登录用户隔离；管理员可以管理账户状态、角色和登录会话。
 
 当前前端包含六个工作区：
 
@@ -92,6 +94,16 @@ Multi-Agent Research Workspace 是一个以前端工作台为入口、FastAPI �
 ```
 
 Supervisor 不直接读取所有网页全文。网页先在工具层压缩，子任务完成后再压缩为 Research Note，从而控制上下文长度并降低无关信息干扰。
+
+### 7. 邮箱认证与用户数据隔离
+
+- 支持邮箱验证码注册、登录、找回密码、会话刷新和退出，密码使用 bcrypt 单向哈希保存。
+- 验证码默认 10 分钟失效，限制重发频率与错误次数，数据库只保存密钥化摘要。
+- Access Token 与 Refresh Token 分离；Refresh Token 只以摘要形式写入 MySQL，并在刷新时轮换。
+- Token 通过 `HttpOnly` Cookie 传输，业务 API 默认要求登录，前端支持刷新页面后恢复会话。
+- 使用请求级用户上下文贯穿 FastAPI、SSE、后台任务和 LangGraph，所有持久化数据按 `user_id` 隔离。
+- 连续登录失败会触发临时锁定；生产环境应启用 HTTPS 和 `AUTH_COOKIE_SECURE=true`。
+- `AUTH_ADMIN_EMAILS` 可以引导首批管理员；管理员操作写入审计日志，并支持停用用户和撤销会话。
 
 ---
 
@@ -289,7 +301,33 @@ MYSQL_PASSWORD=your_mysql_password
 DEFAULT_USER_ID=local-user
 MEMORY_STORAGE_BACKEND=mysql
 
+# 使用下面命令生成，不要在生产环境使用示例值
+AUTH_SECRET_KEY=replace_with_a_long_random_secret
+AUTH_ACCESS_TOKEN_MINUTES=30
+AUTH_REFRESH_TOKEN_DAYS=14
+AUTH_COOKIE_SECURE=false
+AUTH_COOKIE_SAMESITE=lax
+AUTH_CODE_MINUTES=10
+AUTH_CODE_RESEND_SECONDS=60
+AUTH_CODE_MAX_ATTEMPTS=5
+AUTH_ADMIN_EMAILS=admin@example.com
+
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your_smtp_account
+SMTP_PASSWORD=your_smtp_application_password
+SMTP_FROM_EMAIL=your_smtp_account
+SMTP_FROM_NAME=Multi-Agent Research Workspace
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
+
 OBSIDIAN_VAULT=E:/path/to/your/vault
+```
+
+生成随机认证密钥：
+
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
 初始化数据库：
@@ -297,9 +335,18 @@ OBSIDIAN_VAULT=E:/path/to/your/vault
 ```powershell
 mysql -u root -p -e "source migrations/001_multi_agent_memory_schema.sql"
 .\.venv\Scripts\python.exe migrations\002_memory_lifecycle_v2.py
+.\.venv\Scripts\python.exe migrations\003_email_auth.py
+.\.venv\Scripts\python.exe migrations\004_email_verification_admin.py
 ```
 
 启动 FastAPI：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app:app --port 8000
+```
+
+深度研究任务在后端进程中持续执行，因此正常使用时不要添加
+`--reload`。开发代码且没有正在运行的研究任务时，才使用：
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn app:app --reload --port 8000
@@ -358,6 +405,19 @@ DEEP_RESEARCH_WRITER_MODEL=deepseek-v4-pro
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| `POST` | `/api/auth/register` | 邮箱注册并建立登录会话 |
+| `POST` | `/api/auth/login` | 邮箱密码登录 |
+| `POST` | `/api/auth/verify-email` | 校验注册邮箱验证码 |
+| `POST` | `/api/auth/resend-verification` | 重新发送邮箱验证码 |
+| `POST` | `/api/auth/forgot-password` | 请求密码重置验证码 |
+| `POST` | `/api/auth/reset-password` | 校验验证码并重置密码 |
+| `POST` | `/api/auth/refresh` | 轮换 Refresh Token 并刷新会话 |
+| `POST` | `/api/auth/logout` | 撤销当前会话并清理 Cookie |
+| `GET` | `/api/auth/me` | 获取当前登录用户 |
+| `GET` | `/api/admin/users` | 管理员查询用户 |
+| `PATCH` | `/api/admin/users/{id}` | 管理员更新用户状态或角色 |
+| `POST` | `/api/admin/users/{id}/revoke-sessions` | 管理员撤销用户全部会话 |
+| `GET` | `/api/admin/audit-logs` | 查询管理员操作审计日志 |
 | `POST` | `/api/process-video` | 提交视频处理任务 |
 | `GET` | `/api/status/{task_id}` | 获取视频处理 SSE 进度 |
 | `POST` | `/api/notes/import` | 导入本地文档 |
@@ -391,7 +451,7 @@ cd frontend
 npm run build
 ```
 
-重点测试覆盖 Evidence 去重、Citation 校验、StopPolicy、ToolRuntime 消息协议、Checkpoint 恢复、预算限制和记忆冲突策略。
+重点测试覆盖密码与验证码安全、用户文件隔离、Evidence 去重、Citation 校验、StopPolicy、ToolRuntime 消息协议、Checkpoint 恢复、预算限制和记忆冲突策略。
 
 ---
 
@@ -411,7 +471,7 @@ npm run build
 
 ## 🗺️ 后续演进
 
-- 接入登录与多租户权限，使 `user_id` 从本地默认用户升级为真实身份。
+- 增加 MFA、异常登录检测、设备管理和第三方 OAuth，继续完善生产级身份体系。
 - 为 Supervisor 增加候选动作 Look-ahead，根据预期信息增益、成本和风险选择下一步。
 - 将高质量研究轨迹用于 SFT + DPO/GRPO，训练本地 Supervisor/SubResearcher 策略模型，并通过 vLLM 部署。
 - 建设固定 DeepResearch Benchmark、人工盲测和线上回归评估。
