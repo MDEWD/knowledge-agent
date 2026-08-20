@@ -65,13 +65,30 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USERNAME)
-SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Multi-Agent Research Workspace")
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "知研 Agent")
 SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() in {
     "1", "true", "yes", "on",
 }
 SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "false").lower() in {
     "1", "true", "yes", "on",
 }
+
+# CORS: comma-separated allowed browser origins. Credentialed cookies mean
+# wildcards are not allowed, so list every production origin explicitly.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ORIGINS", "http://localhost:5173,http://localhost:3000"
+    ).split(",")
+    if origin.strip()
+]
+
+# Production serves the built frontend from this directory when it exists.
+FRONTEND_DIST_DIR = os.environ.get(
+    "FRONTEND_DIST_DIR",
+    str(Path(__file__).resolve().parent.parent / "frontend" / "dist"),
+)
+
 MEMORY_STORAGE_BACKEND = os.environ.get(
     "MEMORY_STORAGE_BACKEND",
     "mysql" if MYSQL_PASSWORD else "json",

@@ -113,8 +113,8 @@ export default function AuthPage({ onAuthenticated, isDark, onToggleTheme }: Pro
         <div className="auth-brand-panel hidden min-h-[650px] flex-col justify-between border-r border-gray-800 bg-gradient-to-br from-cyan-950/40 via-gray-900/30 to-blue-950/40 p-12 md:flex">
           <div>
             <div className="auth-brand-icon mb-8 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 to-blue-600 text-xl shadow-lg shadow-cyan-900/30">✦</div>
-            <p className="auth-brand-eyebrow mb-3 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-400">Multi-Agent Research</p>
-            <h1 className="auth-brand-title max-w-md text-4xl font-semibold leading-tight">多智能体研究工作台</h1>
+            <p className="auth-brand-eyebrow mb-3 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-400">Knowledge & Research Agent</p>
+            <h1 className="auth-brand-title max-w-md text-4xl font-semibold leading-tight">知研 Agent</h1>
             <p className="auth-brand-copy mt-5 max-w-md text-sm leading-7 text-gray-400">将本地内容、RAG 检索与长周期 DeepResearch 放进同一个可验证、可恢复的研究空间。</p>
           </div>
           <div className="auth-brand-features space-y-4 text-sm text-gray-400">

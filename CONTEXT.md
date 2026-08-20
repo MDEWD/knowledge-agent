@@ -1,4 +1,4 @@
-# Knowledge Agent Deep Research
+# ZhiYan Agent Deep Research
 
 This context defines the language used by the long-running, evidence-grounded research workflow.
 

@@ -1,5 +1,14 @@
+import os
 import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
+
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+# Never disable TLS certificate verification in production. Local dev behind a
+# TLS-intercepting proxy can opt out with SSL_NO_VERIFY=true in backend/.env.
+if os.environ.get("SSL_NO_VERIFY", "false").lower() in {"1", "true", "yes", "on"}:
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 import asyncio
 import hashlib
@@ -16,13 +25,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import httpx
 from openai import AsyncOpenAI
-from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-
-load_dotenv(override=True)
 
 from config import (
     DATA_PATH,
@@ -46,6 +53,8 @@ from config import (
     QWEN_API_KEY,
     QWEN_BASE_URL,
     QWEN_MODEL,
+    CORS_ORIGINS,
+    FRONTEND_DIST_DIR,
     UVICORN_RELOAD,
 )
 from extractors.generic import get_transcript as generic_transcript
@@ -156,7 +165,7 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(ApiAuthenticationMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2093,6 +2102,12 @@ async def skills_delete(skill_id: str):
     return {"ok": True}
 
 
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe for Docker healthchecks (no auth, no /api/ prefix)."""
+    return {"status": "ok"}
+
+
 @app.get("/api/harness/status")
 async def harness_status():
     """Return circuit breaker state and basic health info."""
@@ -2164,6 +2179,23 @@ async def evals_agent_results():
     return _json.loads(path.read_text(encoding="utf-8"))
 
 
+# ── Frontend static serving (production, same-origin) ─────────────────────────
+# Registered last so API routes keep precedence. When the frontend build output
+# exists, serve it directly and fall back to index.html for client-side routes.
+if Path(FRONTEND_DIST_DIR).is_dir():
+    assets_dir = os.path.join(FRONTEND_DIST_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        requested = os.path.join(FRONTEND_DIST_DIR, full_path)
+        if full_path and os.path.isfile(requested):
+            return FileResponse(requested)
+        return FileResponse(os.path.join(FRONTEND_DIST_DIR, "index.html"))
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=UVICORN_RELOAD)
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=UVICORN_RELOAD)

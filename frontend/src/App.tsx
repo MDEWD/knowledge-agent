@@ -151,7 +151,7 @@ export default function App() {
       {/* Global navigation */}
       <header className="flex h-14 shrink-0 items-stretch border-b border-gray-800">
         <div className="flex w-72 shrink-0 items-center px-5">
-          <h1 className="text-base font-bold text-white">智能 Agent 工作台</h1>
+          <h1 className="text-base font-bold text-white">知研 Agent</h1>
         </div>
         <nav className="flex min-w-0 flex-1 overflow-x-auto px-4">
           {TABS.map((tab) => (

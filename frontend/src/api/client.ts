@@ -1,7 +1,7 @@
 import type { ProcessingEvent, Video, ChatMessage, ChatHistorySession, Stats, Review, YoutubeVideoSuggestion, Recommendation, CitationSource, RecallCard, RecallStats, KnowledgeGraph, UserMemory, MemoryConflict, ImportedNote, AgentEvent, EvalResult, SkillEntry, HarnessStatus, AuthUser, AdminUser, AuthAuditLog } from '../types'
 import { authenticatedFetch, refreshSessionRequest } from './authFetch'
 
-const BASE = '/api'
+const BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
 async function apiPayload<T>(res: Response): Promise<T> {
   if (res.ok) return res.json()

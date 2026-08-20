@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🧭 Multi-Agent Research Workspace
+# 🧭 知研 Agent
 
-### 多智能体研究工作台
+### 知识库与深度研究 Agent
 
 面向复杂研究任务的 AI Agent 应用：统一承载邮箱身份认证、内容采集、RAG 对话、长周期 DeepResearch、结构化证据校验与分层记忆。
 
@@ -21,7 +21,7 @@
 
 ## 🎯 项目介绍
 
-Multi-Agent Research Workspace 是一个以前端工作台为入口、FastAPI 为接入层、RAG 与 DeepResearch 为业务核心的多智能体应用。
+知研 Agent 是一个以前端工作台为入口、FastAPI 为接入层、RAG 与 DeepResearch 为业务核心的多智能体应用。
 
 系统既可以把视频和本地文档转化为可检索内容，也可以针对开放问题执行长周期研究：由 Supervisor 拆解任务，调度多个 SubResearcher 并行检索，使用结构化 Evidence 约束报告生成，再通过 Red Team、Evaluator 和 Citation Validator 完成对抗审查与引用校验。
 
@@ -216,7 +216,7 @@ RAG 负责回答本地内容问题；DeepResearch 负责处理需要任务拆解
 ## 📁 目录结构
 
 ```text
-knowledge-agent/
+zhiyan-agent/
 ├── backend/
 │   ├── app.py                         # FastAPI 主入口
 │   ├── config.py                      # 环境变量与运行配置
@@ -317,7 +317,7 @@ SMTP_PORT=587
 SMTP_USERNAME=your_smtp_account
 SMTP_PASSWORD=your_smtp_application_password
 SMTP_FROM_EMAIL=your_smtp_account
-SMTP_FROM_NAME=Multi-Agent Research Workspace
+SMTP_FROM_NAME=知研 Agent
 SMTP_USE_TLS=true
 SMTP_USE_SSL=false
 
@@ -481,6 +481,6 @@ npm run build
 
 <div align="center">
 
-**Multi-Agent Research Workspace — 让 Agent 的研究过程可追踪、结论可验证、任务可恢复。**
+**知研 Agent — 让 Agent 的研究过程可追踪、结论可验证、任务可恢复。**
 
 </div>
