@@ -1,0 +1,16 @@
+# Keep the Docker build context small and free of secrets/runtime state.
+.git
+.gitignore
+.env
+.env.*
+!.env.production
+backend/.venv
+backend/data
+backend/__pycache__
+backend/**/__pycache__
+backend/**/*.pyc
+backend/.pytest_cache
+frontend/node_modules
+frontend/dist
+node_modules
+tmp

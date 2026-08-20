@@ -1,5 +1,14 @@
+import os
 import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
+
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+# Never disable TLS certificate verification in production. Local dev behind a
+# TLS-intercepting proxy can opt out with SSL_NO_VERIFY=true in backend/.env.
+if os.environ.get("SSL_NO_VERIFY", "false").lower() in {"1", "true", "yes", "on"}:
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 import asyncio
 import hashlib
@@ -14,18 +23,22 @@ from typing import AsyncGenerator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import httpx
 from openai import AsyncOpenAI
-from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-
-load_dotenv(override=True)
 
 from config import (
     DATA_PATH,
     DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
+    DEEP_RESEARCH_LLM_RETRY_ATTEMPTS,
+    DEEP_RESEARCH_LLM_RETRY_BASE_SECONDS,
+    DEEP_RESEARCH_LLM_RETRY_MAX_SECONDS,
+    DEEP_RESEARCH_HTTP_KEEPALIVE_CONNECTIONS,
+    DEEP_RESEARCH_HTTP_MAX_CONNECTIONS,
     DEEP_RESEARCH_MAX_COST_USD,
     DEEP_RESEARCH_MAX_INPUT_TOKENS,
     DEEP_RESEARCH_MAX_OUTPUT_TOKENS,
@@ -40,6 +53,9 @@ from config import (
     QWEN_API_KEY,
     QWEN_BASE_URL,
     QWEN_MODEL,
+    CORS_ORIGINS,
+    FRONTEND_DIST_DIR,
+    UVICORN_RELOAD,
 )
 from extractors.generic import get_transcript as generic_transcript
 from extractors.youtube import get_transcript as yt_transcript
@@ -50,6 +66,8 @@ from storage.obsidian import save_to_obsidian, update_obsidian_note
 from storage.vector_store import add_document, add_note_document, delete_document, find_related, search
 from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note, batch_update_significance
 from storage.deep_research_history import (
+    append_pending_turn,
+    complete_turn,
     delete_session as delete_deep_research_session,
     get_session as get_deep_research_session,
     list_sessions as list_deep_research_sessions,
@@ -61,6 +79,10 @@ from storage.chat_history import (
     save_session as save_chat_history_session,
 )
 from observability.tracer import tracer
+from auth.context import get_current_user_id, user_data_path, user_scope, user_storage_key
+from auth.middleware import ApiAuthenticationMiddleware
+from auth.routes import router as auth_router
+from auth.admin_routes import router as admin_router
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -97,6 +119,7 @@ def _sync_bm25_from_chroma() -> None:
             for doc_id, doc, meta in zip(
                 results["ids"], results["documents"], results["metadatas"]
             )
+            if (meta or {}).get("user_id") == "local-user"
         ]
         bm25_store.add_documents(items)
         print(f"[BM25] Synced {len(items)} chunks from ChromaDB")
@@ -122,20 +145,33 @@ async def lifespan(app: FastAPI):
     # Populate BM25 from Chroma on first startup after upgrade
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _sync_bm25_from_chroma)
-    yield
-    _scheduler.shutdown()
+    try:
+        yield
+    finally:
+        # DeepResearch jobs are process-local. Await their cancellation while
+        # the loop is still alive so SDK/session cleanup never runs at atexit.
+        registry = globals().get("_deep_runs")
+        if registry is not None:
+            await registry.shutdown()
+        _scheduler.shutdown()
 
 
 # ── App & middleware ───────────────────────────────────────────────────────────
 
 app = FastAPI(lifespan=lifespan)
 
+# Authentication is added before CORS so CORS remains the outer middleware and
+# decorates authentication errors for supported browser origins.
+app.add_middleware(ApiAuthenticationMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -185,6 +221,7 @@ class ReviewRequest(BaseModel):
 # ── Task state ────────────────────────────────────────────────────────────────
 
 task_queues: dict[str, asyncio.Queue] = {}
+task_owners: dict[str, str] = {}
 
 
 async def _push(task_id: str, event: dict) -> None:
@@ -195,18 +232,26 @@ async def _push(task_id: str, event: dict) -> None:
 
 # ── Background pipeline ───────────────────────────────────────────────────────
 
-async def _process_video(task_id: str, url: str, platform: str, translate: bool = False, diarize: bool = False) -> None:
+async def _process_video(
+    task_id: str,
+    url: str,
+    platform: str,
+    translate: bool = False,
+    diarize: bool = False,
+    user_id: str = "local-user",
+) -> None:
     try:
+      with user_scope(user_id):
         await _push(task_id, {"step": "extracting", "progress": 10, "message": "正在提取字幕…"})
 
         loop = asyncio.get_event_loop()
 
         if platform == "youtube":
-            result = await loop.run_in_executor(None, yt_transcript, url)
+            result = await asyncio.to_thread(yt_transcript, url)
         elif platform == "bilibili":
-            result = await loop.run_in_executor(None, bili_transcript, url)
+            result = await asyncio.to_thread(bili_transcript, url)
         else:
-            result = await loop.run_in_executor(None, generic_transcript, url)
+            result = await asyncio.to_thread(generic_transcript, url)
 
         transcript = result["text"]
         metadata = result["metadata"]
@@ -216,26 +261,26 @@ async def _process_video(task_id: str, url: str, platform: str, translate: bool 
         if translate and not is_mainly_chinese(transcript):
             await _push(task_id, {"step": "processing", "progress": 30, "message": "检测到英文内容，正在翻译字幕…"})
             original_transcript = transcript
-            transcript = await loop.run_in_executor(None, translate_to_chinese, transcript)
+            transcript = await asyncio.to_thread(translate_to_chinese, transcript)
 
         if diarize:
             await _push(task_id, {"step": "processing", "progress": 38, "message": "正在识别说话人…"})
             from processors.diarization import detect_and_diarize
-            transcript = await loop.run_in_executor(None, detect_and_diarize, transcript)
+            transcript = await asyncio.to_thread(detect_and_diarize, transcript)
 
         await _push(task_id, {"step": "processing", "progress": 45, "message": "DeepSeek 正在提炼核心观点…"})
 
-        insights = await loop.run_in_executor(None, extract_insights, transcript, metadata)
+        insights = await asyncio.to_thread(extract_insights, transcript, metadata)
 
         await _push(task_id, {"step": "saving", "progress": 80, "message": "写入 Obsidian 和向量库…"})
 
-        obsidian_path = await loop.run_in_executor(
-            None, save_to_obsidian, insights, metadata, transcript, original_transcript
+        obsidian_path = await asyncio.to_thread(
+            save_to_obsidian, insights, metadata, transcript, original_transcript
         )
-        await loop.run_in_executor(None, add_document, insights, metadata)
+        await asyncio.to_thread(add_document, insights, metadata)
 
-        related = await loop.run_in_executor(
-            None, find_related, metadata["id"], metadata.get("title", "")
+        related = await asyncio.to_thread(
+            find_related, metadata["id"], metadata.get("title", "")
         )
 
         summary = ""
@@ -263,7 +308,7 @@ async def _process_video(task_id: str, url: str, platform: str, translate: bool 
             "obsidian_path": str(obsidian_path),
             "created_at": datetime.now().isoformat(),
         }
-        await loop.run_in_executor(None, add_video, video_record)
+        await asyncio.to_thread(add_video, video_record)
 
         await _push(task_id, {
             "step": "done",
@@ -277,30 +322,38 @@ async def _process_video(task_id: str, url: str, platform: str, translate: bool 
     finally:
         await asyncio.sleep(30)
         task_queues.pop(task_id, None)
+        task_owners.pop(task_id, None)
 
 
-def _reindex_note(video: dict, new_insights: str) -> None:
-    delete_document(video["url"])
-    add_document(new_insights, video)
+def _reindex_note(video: dict, new_insights: str, user_id: str) -> None:
+    with user_scope(user_id):
+        delete_document(video["url"])
+        add_document(new_insights, video)
 
 
 # ── Note file import pipeline ─────────────────────────────────────────────────
 
-async def _process_note_file(task_id: str, tmp_path: Path, original_name: str) -> None:
+async def _process_note_file(
+    task_id: str,
+    tmp_path: Path,
+    original_name: str,
+    user_id: str = "local-user",
+) -> None:
     try:
+      with user_scope(user_id):
         await _push(task_id, {"step": "extracting", "progress": 10, "message": f"正在读取 {original_name}…"})
         loop = asyncio.get_event_loop()
         ext = Path(original_name).suffix.lstrip(".").lower()
 
         from processors.note_importer import extract_text, generate_note_metadata
-        text = await loop.run_in_executor(None, extract_text, tmp_path, ext)
+        text = await asyncio.to_thread(extract_text, tmp_path, ext)
         if not text.strip():
             await _push(task_id, {"step": "error", "progress": 0, "message": "无法提取文本内容，请检查文件格式"})
             return
 
         await _push(task_id, {"step": "processing", "progress": 40, "message": "AI 正在分析笔记内容…"})
         title = Path(original_name).stem
-        metadata = await loop.run_in_executor(None, generate_note_metadata, text, title)
+        metadata = await asyncio.to_thread(generate_note_metadata, text, title)
         summary = metadata.get("summary", "")
         category = metadata.get("category", "其他")
         tags = metadata.get("tags", [])
@@ -311,8 +364,8 @@ async def _process_note_file(task_id: str, tmp_path: Path, original_name: str) -
         note_url = f"note://{note_id}"
 
         # Save to Obsidian
-        from config import OBSIDIAN_VAULT_PATH
-        note_dir = OBSIDIAN_VAULT_PATH / "导入笔记"
+        from storage.obsidian import get_user_vault_root
+        note_dir = get_user_vault_root() / "导入笔记"
         note_dir.mkdir(parents=True, exist_ok=True)
         safe_title = re.sub(r'[<>:"/\\|?*]', "-", title)[:60]
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -334,7 +387,7 @@ async def _process_note_file(task_id: str, tmp_path: Path, original_name: str) -
             "platform": "note",
         }
         full_text_for_index = f"{title}。{summary}\n\n{text}" if summary else f"{title}\n\n{text}"
-        await loop.run_in_executor(None, add_note_document, full_text_for_index, note_meta)
+        await asyncio.to_thread(add_note_document, full_text_for_index, note_meta)
 
         # Save to notes DB
         note_record = {
@@ -352,7 +405,7 @@ async def _process_note_file(task_id: str, tmp_path: Path, original_name: str) -
             "url": note_url,
         }
         from storage.notes_db import add_note as _add_imported_note
-        await loop.run_in_executor(None, _add_imported_note, note_record)
+        await asyncio.to_thread(_add_imported_note, note_record)
 
         await _push(task_id, {
             "step": "done",
@@ -370,6 +423,7 @@ async def _process_note_file(task_id: str, tmp_path: Path, original_name: str) -
             pass
         await asyncio.sleep(30)
         task_queues.pop(task_id, None)
+        task_owners.pop(task_id, None)
 
 
 
@@ -587,7 +641,7 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
         seen_keys: set[str] = set()
         all_candidates: list[dict] = []
         for q in all_queries:
-            for c in await loop.run_in_executor(None, search, q, 15):
+            for c in await asyncio.to_thread(search, q, 15):
                 key = f"{c['metadata'].get('url', '')}::{c['metadata'].get('chunk_index', 0)}"
                 if key not in seen_keys:
                     seen_keys.add(key)
@@ -598,13 +652,13 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
 
         # Step 4: Rerank with significance boost
         from processors.significance import get_significance_map
-        sig_map = await loop.run_in_executor(None, get_significance_map)
+        sig_map = await asyncio.to_thread(get_significance_map)
         results = await loop.run_in_executor(
             None, rerank_with_significance, query, all_candidates, 6, sig_map
         )
 
         from storage.vector_store import is_topic_covered
-        covered = await loop.run_in_executor(None, is_topic_covered, query, 1, 1.0)
+        covered = await asyncio.to_thread(is_topic_covered, query, 1, 1.0)
 
         # Build numbered source list (deduplicated by URL)
         source_map: dict[str, dict] = {}
@@ -670,7 +724,7 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
 
     if name == "summarize_category":
         from processors.article import summarize_category_impl
-        result = await loop.run_in_executor(None, summarize_category_impl, args.get("category", ""))
+        result = await asyncio.to_thread(summarize_category_impl, args.get("category", ""))
         return result, None, None
 
     if name == "compare_videos":
@@ -683,7 +737,7 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
 
     if name == "search_youtube_videos":
         from extractors.youtube_search import search_youtube
-        videos = await loop.run_in_executor(None, search_youtube, args.get("query", ""), 5)
+        videos = await asyncio.to_thread(search_youtube, args.get("query", ""), 5)
         if not videos:
             return "未找到相关视频", None, None
         lines = [f"- {v['title']} | {v['url']} | 频道:{v['channel']}" for v in videos]
@@ -850,8 +904,8 @@ async def chat_stream(req: ChatRequest):
                 gap = reflection.get("gap", "")
                 yield f"data: {json.dumps({'type': 'reflection', 'gap': gap}, ensure_ascii=False)}\n\n"
                 # Supplementary search targeting the identified gap
-                supp_candidates = await loop.run_in_executor(None, search, gap, 12)
-                supp_results = await loop.run_in_executor(None, rerank, gap, supp_candidates, 3)
+                supp_candidates = await asyncio.to_thread(search, gap, 12)
+                supp_results = await asyncio.to_thread(rerank, gap, supp_candidates, 3)
                 if supp_results:
                     supp_context = "\n\n".join(r["content"] for r in supp_results)
                     supp_stream = await async_client.chat.completions.create(
@@ -875,7 +929,7 @@ async def chat_stream(req: ChatRequest):
 
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
         tracer.flush()
-        loop.run_in_executor(None, update_memory_from_conversation, req.as_dicts())
+        asyncio.create_task(asyncio.to_thread(update_memory_from_conversation, req.as_dicts()))
 
     return StreamingResponse(
         generate(),
@@ -917,7 +971,7 @@ async def chat_history_delete(session_id: str):
 async def generate_review(req: ReviewRequest):
     loop = asyncio.get_event_loop()
     from processors.review import generate_weekly_review
-    result = await loop.run_in_executor(None, generate_weekly_review, req.days)
+    result = await asyncio.to_thread(generate_weekly_review, req.days)
     return result
 
 
@@ -973,7 +1027,7 @@ async def get_reviews():
 async def get_recommendations():
     loop = asyncio.get_event_loop()
     from processors.recommendations import generate_recommendations
-    result = await loop.run_in_executor(None, generate_recommendations)
+    result = await asyncio.to_thread(generate_recommendations)
     return result
 
 
@@ -1055,19 +1109,20 @@ async def get_note(video_id: str):
 
 @app.put("/api/videos/{video_id}/note")
 async def update_note(video_id: str, req: NoteUpdateRequest, background_tasks: BackgroundTasks):
+    user_id = get_current_user_id()
     video = get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, update_obsidian_note,
+    await asyncio.to_thread(
+        update_obsidian_note,
         video.get("obsidian_path", ""),
         video.get("title", ""),
         video.get("transcript", ""),
         req.insights,
     )
     update_video_note(video_id, req.insights)
-    background_tasks.add_task(_reindex_note, video, req.insights)
+    background_tasks.add_task(_reindex_note, video, req.insights, user_id)
     return {"ok": True}
 
 
@@ -1086,15 +1141,19 @@ async def remove_video(video_id: str):
 
 @app.post("/api/process-video")
 async def process_video(req: ProcessRequest, background_tasks: BackgroundTasks):
+    user_id = get_current_user_id()
     task_id = str(uuid.uuid4())
     task_queues[task_id] = asyncio.Queue()
-    background_tasks.add_task(_process_video, task_id, req.url, req.platform, req.translate, req.diarize)
+    task_owners[task_id] = user_id
+    background_tasks.add_task(
+        _process_video, task_id, req.url, req.platform, req.translate, req.diarize, user_id
+    )
     return {"task_id": task_id}
 
 
 @app.get("/api/status/{task_id}")
 async def stream_status(task_id: str):
-    if task_id not in task_queues:
+    if task_id not in task_queues or task_owners.get(task_id) != get_current_user_id():
         raise HTTPException(status_code=404, detail="Task not found")
 
     async def generate() -> AsyncGenerator[str, None]:
@@ -1130,7 +1189,7 @@ class RecallReviewRequest(BaseModel):
 async def recall_generate(req: RecallGenerateRequest):
     loop = asyncio.get_event_loop()
     from processors.recall import generate_cards_for_video
-    cards = await loop.run_in_executor(None, generate_cards_for_video, req.video_id, req.count)
+    cards = await asyncio.to_thread(generate_cards_for_video, req.video_id, req.count)
     return {"cards": cards}
 
 
@@ -1150,7 +1209,7 @@ async def recall_all():
 async def recall_review(card_id: str, req: RecallReviewRequest):
     loop = asyncio.get_event_loop()
     from processors.recall import review_card
-    updated = await loop.run_in_executor(None, review_card, card_id, req.quality)
+    updated = await asyncio.to_thread(review_card, card_id, req.quality)
     if not updated:
         raise HTTPException(status_code=404, detail="Card not found")
     return updated
@@ -1169,21 +1228,21 @@ async def recall_delete_by_video(video_id: str):
 async def get_graph():
     loop = asyncio.get_event_loop()
     from processors.knowledge_graph import build_graph
-    return await loop.run_in_executor(None, build_graph, False)
+    return await asyncio.to_thread(build_graph, False)
 
 
 @app.post("/api/graph/rebuild")
 async def rebuild_graph():
     loop = asyncio.get_event_loop()
     from processors.knowledge_graph import build_graph
-    return await loop.run_in_executor(None, build_graph, True)
+    return await asyncio.to_thread(build_graph, True)
 
 
 @app.get("/api/graph/gaps")
 async def get_graph_gaps():
     loop = asyncio.get_event_loop()
     from processors.knowledge_graph import analyze_gaps
-    return await loop.run_in_executor(None, analyze_gaps)
+    return await asyncio.to_thread(analyze_gaps)
 
 
 class GapResearchRequest(BaseModel):
@@ -1197,8 +1256,8 @@ async def research_gap(req: GapResearchRequest):
     loop = asyncio.get_event_loop()
     from storage.vector_store import search
     from processors.rag_enhancer import rerank
-    candidates = await loop.run_in_executor(None, search, req.query, 10)
-    ranked = await loop.run_in_executor(None, rerank, req.query, candidates, 5)
+    candidates = await asyncio.to_thread(search, req.query, 10)
+    ranked = await asyncio.to_thread(rerank, req.query, candidates, 5)
     if not ranked:
         return {"found": False, "gap_title": req.gap_title, "query": req.query, "results": []}
     return {
@@ -1349,6 +1408,7 @@ async def import_notes(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
 ):
+    user_id = get_current_user_id()
     tasks = []
     for f in files:
         ext = Path(f.filename or "file.txt").suffix.lower()
@@ -1360,7 +1420,10 @@ async def import_notes(
         tmp.close()
         task_id = str(uuid.uuid4())
         task_queues[task_id] = asyncio.Queue()
-        background_tasks.add_task(_process_note_file, task_id, Path(tmp.name), f.filename or "untitled")
+        task_owners[task_id] = user_id
+        background_tasks.add_task(
+            _process_note_file, task_id, Path(tmp.name), f.filename or "untitled", user_id
+        )
         tasks.append({"task_id": task_id, "filename": f.filename})
     if not tasks:
         raise HTTPException(status_code=400, detail="没有可处理的文件（支持 .md .txt .pdf .docx）")
@@ -1398,8 +1461,8 @@ async def delete_note(note_id: str):
 
 # Shared harness components (one per process)
 _harness_circuit = None
-_skill_store = None
-_checkpoint_store = None
+_skill_stores: dict[str, object] = {}
+_checkpoint_stores: dict[str, object] = {}
 
 # HITL: maps run_id → asyncio.Event waiting for human confirmation
 _pending_confirmations: dict[str, asyncio.Event] = {}
@@ -1412,18 +1475,18 @@ def _get_harness_circuit():
     return _harness_circuit
 
 def _get_skill_store():
-    global _skill_store
-    if _skill_store is None:
+    user_id = get_current_user_id()
+    if user_id not in _skill_stores:
         from skills import SkillStore
-        _skill_store = SkillStore("data/skills")
-    return _skill_store
+        _skill_stores[user_id] = SkillStore(user_data_path("skills", user_id=user_id))
+    return _skill_stores[user_id]
 
 def _get_checkpoint_store():
-    global _checkpoint_store
-    if _checkpoint_store is None:
+    user_id = get_current_user_id()
+    if user_id not in _checkpoint_stores:
         from harness.checkpoint import CheckpointStore
-        _checkpoint_store = CheckpointStore("data/checkpoints")
-    return _checkpoint_store
+        _checkpoint_stores[user_id] = CheckpointStore(user_data_path("checkpoints", user_id=user_id))
+    return _checkpoint_stores[user_id]
 
 
 class AgentRunRequest(BaseModel):
@@ -1433,6 +1496,7 @@ class AgentRunRequest(BaseModel):
 
 @app.post("/api/agent/run")
 async def agent_run(req: AgentRunRequest):
+    user_prefix = user_storage_key()
     async_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
     async def generate() -> AsyncGenerator[str, None]:
@@ -1451,7 +1515,7 @@ async def agent_run(req: AgentRunRequest):
         # Inject lessons from lesson store into task context
         from harness.lessons import LessonStore
         from harness.context import AgentContextBuilder
-        lesson_store = LessonStore(DATA_PATH / "harness_lessons.json")
+        lesson_store = LessonStore(user_data_path("harness_lessons.json"))
         context_builder = AgentContextBuilder(lesson_store)
         lesson_context = context_builder.build(req.task)
 
@@ -1463,7 +1527,12 @@ async def agent_run(req: AgentRunRequest):
         )
 
         # HITL: create a per-run confirmation event
-        run_id = req.run_id or str(uuid.uuid4())
+        requested_run_id = req.run_id or str(uuid.uuid4())
+        run_id = (
+            requested_run_id
+            if requested_run_id.startswith(f"{user_prefix}:")
+            else f"{user_prefix}:{requested_run_id}"
+        )
         confirm_event = asyncio.Event()
         _pending_confirmations[run_id] = confirm_event
 
@@ -1557,6 +1626,8 @@ async def agent_run(req: AgentRunRequest):
 @app.post("/api/agent/confirm/{run_id}")
 async def agent_confirm(run_id: str):
     """HITL: signal that the user approved the orchestrator's plan."""
+    if not run_id.startswith(f"{user_storage_key()}:"):
+        raise HTTPException(status_code=404, detail="No pending run with that ID.")
     event = _pending_confirmations.get(run_id)
     if not event:
         raise HTTPException(status_code=404, detail="No pending run with that ID.")
@@ -1574,6 +1645,7 @@ class DeepConversationTurn(BaseModel):
 class DeepRunRequest(BaseModel):
     task: str
     run_id: str | None = None  # supply to resume a previous run
+    session_id: str | None = None
     history: list[DeepConversationTurn] = Field(default_factory=list)
 
 
@@ -1596,11 +1668,13 @@ class DeepExportRequest(BaseModel):
     format: str = Field(pattern="^(md|pdf)$")
 
 
-_deep_cancel_events: dict[str, asyncio.Event] = {}
+from agents.deep_research.run_registry import DeepRunRecord, DeepRunRegistry
+
+_deep_runs = DeepRunRegistry()
 
 
 @app.post("/api/agent/deep-run")
-async def agent_deep_run(req: DeepRunRequest, request: Request):
+async def agent_deep_run(req: DeepRunRequest):
     """DeepResearch 模式入口。
 
     相比 /api/agent/run(quick), 这条路径走 BriefWriter→DraftWriter→
@@ -1609,18 +1683,47 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
 
     数据源由 config.SEARCH_BACKEND 决定: kb_only / web_only / hybrid。
     """
-    async_client = AsyncOpenAI(
-        api_key=DEEPSEEK_API_KEY,
-        base_url=DEEPSEEK_BASE_URL,
-        timeout=DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
-        max_retries=0,
+    owner_id = get_current_user_id()
+    user_prefix = user_storage_key()
+    requested_run_id = req.run_id or str(uuid.uuid4())
+    run_id = (
+        requested_run_id
+        if requested_run_id.startswith(f"{user_prefix}:")
+        else f"{user_prefix}:{requested_run_id}"
     )
+    session_id = req.session_id or str(uuid.uuid4())
 
-    run_id = req.run_id or str(uuid.uuid4())
-    cancel_event = asyncio.Event()
-    _deep_cancel_events[run_id] = cancel_event
+    existing_run = _deep_runs.get_for_owner(run_id, owner_id)
+    if existing_run and existing_run.status == "running":
+        return StreamingResponse(
+            _stream_deep_run(existing_run),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
-    async def generate() -> AsyncGenerator[str, None]:
+    # Store the question before any LLM call so refresh/reconnect can restore it.
+    with user_scope(owner_id):
+        stored_session = await asyncio.to_thread(get_deep_research_session, session_id)
+        stored_turns, target_turn_index = append_pending_turn(
+            list((stored_session or {}).get("turns") or []),
+            req.task,
+        )
+        await asyncio.to_thread(
+            upsert_deep_research_session,
+            {
+                "id": session_id,
+                "title": (stored_session or {}).get("title") or req.task,
+                "run_id": run_id,
+                "turns": stored_turns,
+                "evidence": (stored_session or {}).get("evidence") or [],
+            },
+        )
+
+    async def generate(record: DeepRunRecord) -> AsyncGenerator[dict, None]:
         from agents.deep_research import DeepResearchOrchestrator
         from agents.deep_research.context import build_deep_research_task
         from agent_skills.loader import FileSkillRegistry
@@ -1629,6 +1732,25 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
         from harness.lessons import LessonStore
         from harness.context import AgentContextBuilder
         from skills import SkillExtractor
+
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
+                connect=min(20.0, DEEP_RESEARCH_LLM_TIMEOUT_SECONDS),
+            ),
+            limits=httpx.Limits(
+                max_connections=DEEP_RESEARCH_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=DEEP_RESEARCH_HTTP_KEEPALIVE_CONNECTIONS,
+            ),
+            trust_env=True,
+        )
+        async_client = AsyncOpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL,
+            timeout=DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
+            max_retries=0,
+            http_client=http_client,
+        )
 
         # 注入技能库 + Harness lessons。历史只作为研究上下文，技能匹配、
         # Guardrails 和效果评分仍围绕用户本轮问题执行。
@@ -1641,9 +1763,9 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
             *[{'name': s.name, 'description': s.description} for s in file_skills],
         ]
         if surfaced_skills:
-            yield f"data: {json.dumps({'type': 'skills', 'skills': surfaced_skills}, ensure_ascii=False)}\n\n"
+            yield {"type": "skills", "skills": surfaced_skills}
 
-        lesson_store = LessonStore(DATA_PATH / "harness_lessons.json")
+        lesson_store = LessonStore(user_data_path("harness_lessons.json"))
         context_builder = AgentContextBuilder(lesson_store)
         lesson_context = context_builder.build(req.task)
 
@@ -1686,7 +1808,11 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
         orch = DeepResearchOrchestrator(
             async_client, DEEPSEEK_MODEL,
             checkpoint_store=_get_checkpoint_store(),
-            policy=RetryPolicy(max_attempts=3, base_delay=1.0),
+            policy=RetryPolicy(
+                max_attempts=DEEP_RESEARCH_LLM_RETRY_ATTEMPTS,
+                base_delay=DEEP_RESEARCH_LLM_RETRY_BASE_SECONDS,
+                max_delay=DEEP_RESEARCH_LLM_RETRY_MAX_SECONDS,
+            ),
             circuit=_get_harness_circuit(),
             budget=research_budget,
         )
@@ -1698,25 +1824,18 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
         try:
             guardrails.pre_check(req.task)
 
-            async def monitor_disconnect() -> None:
-                while not cancel_event.is_set():
-                    if await request.is_disconnected():
-                        cancel_event.set()
-                        return
-                    await asyncio.sleep(0.25)
-
-            disconnect_task = asyncio.create_task(monitor_disconnect())
-
             async for event in orch.run_stream(
                 research_task,
                 run_id=run_id,
                 lesson_context=lesson_context,
-                cancel_event=cancel_event,
+                cancel_event=record.cancel_event,
             ):
                 ev_type = event.get("type")
                 if ev_type == "text":
                     transcript_parts.append(event.get("content", ""))
                     final_output += event.get("content", "")
+                elif ev_type == "report_replace":
+                    final_output = event.get("content", "")
                 elif ev_type == "plan":
                     transcript_parts.append(json.dumps(event, ensure_ascii=False))
                 elif ev_type == "agent_done":
@@ -1726,12 +1845,12 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
                 elif ev_type == "sub_agent_tool":
                     total_tool_calls += 1
 
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield event
 
             _get_harness_circuit().record_success()
 
             real_budget = research_budget.summary()
-            yield f"data: {json.dumps({'type': 'harness', 'budget': real_budget}, ensure_ascii=False)}\n\n"
+            yield {"type": "harness", "budget": real_budget}
 
             # 后台技能提取(非阻塞)
             transcript = "\n".join(transcript_parts)
@@ -1740,7 +1859,11 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
             for skill in new_skills:
                 store.save(skill)
             if new_skills:
-                yield f"data: {json.dumps({'type': 'skill_learned', 'count': len(new_skills), 'names': [s.name for s in new_skills]}, ensure_ascii=False)}\n\n"
+                yield {
+                    "type": "skill_learned",
+                    "count": len(new_skills),
+                    "names": [s.name for s in new_skills],
+                }
 
             # 反馈回路: 评分并更新 lessons/skills 效果
             if final_output and (injected_skill_ids or context_builder.last_injected_ids):
@@ -1753,29 +1876,127 @@ async def agent_deep_run(req: DeepRunRequest, request: Request):
 
         except Exception as exc:
             _get_harness_circuit().record_failure()
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield {"type": "error", "message": str(exc)}
+            yield {"type": "done"}
         finally:
-            cancel_event.set()
-            if "disconnect_task" in locals():
-                disconnect_task.cancel()
-                await asyncio.gather(disconnect_task, return_exceptions=True)
-            _deep_cancel_events.pop(run_id, None)
             tracer.flush()
+            await async_client.close()
 
+    async def run_in_background(record: DeepRunRecord) -> None:
+        final_output = ""
+        evidence_by_url: dict[str, dict] = {}
+        with user_scope(owner_id):
+            await record.publish(
+                {
+                    "type": "run_attached",
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "task": req.task,
+                    "status": "running",
+                }
+            )
+            try:
+                async for event in generate(record):
+                    event_type = event.get("type")
+                    if event_type == "report_replace":
+                        final_output = str(event.get("content") or "")
+                    elif event_type == "text":
+                        final_output += str(event.get("content") or "")
+                    elif event_type == "research_source":
+                        url = str(event.get("url") or "").strip()
+                        if url:
+                            evidence_by_url[url] = dict(event)
+                    await record.publish(event)
+            finally:
+                # Persist completed or partial output before reload/shutdown.
+                latest = await asyncio.to_thread(get_deep_research_session, session_id)
+                turns = complete_turn(
+                    list((latest or {}).get("turns") or stored_turns),
+                    target_turn_index,
+                    question=req.task,
+                    answer=final_output,
+                )
+                await asyncio.to_thread(
+                    upsert_deep_research_session,
+                    {
+                        "id": session_id,
+                        "title": (latest or {}).get("title") or req.task,
+                        "run_id": run_id,
+                        "turns": turns,
+                        "evidence": list(evidence_by_url.values()),
+                    },
+                )
+
+    record = _deep_runs.start(
+        owner_id=owner_id,
+        run_id=run_id,
+        task=req.task,
+        session_id=session_id,
+        runner=run_in_background,
+    )
     return StreamingResponse(
-        generate(),
+        _stream_deep_run(record),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+async def _stream_deep_run(
+    record: DeepRunRecord,
+    after: int = 0,
+) -> AsyncGenerator[str, None]:
+    """Subscribe to a run without owning or cancelling its lifecycle."""
+    async for sequence, event in record.stream(after=after):
+        yield (
+            f"id: {sequence}\n"
+            f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        )
+
+
+@app.get("/api/agent/deep-runs/active")
+async def agent_deep_active_runs():
+    owner_id = get_current_user_id()
+    return {
+        "runs": [
+            {
+                "run_id": record.run_id,
+                "session_id": record.session_id,
+                "task": record.task,
+                "status": record.status,
+                "started_at": record.started_at,
+                "last_seq": record.last_seq,
+            }
+            for record in _deep_runs.active_for(owner_id)
+        ]
+    }
+
+
+@app.get("/api/agent/deep-run/{run_id}/events")
+async def agent_deep_events(run_id: str, after: int = 0):
+    record = _deep_runs.get_for_owner(run_id, get_current_user_id())
+    if record is None:
+        raise HTTPException(status_code=404, detail="DeepResearch run not found")
+    return StreamingResponse(
+        _stream_deep_run(record, after=max(0, after)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
 @app.post("/api/agent/deep-run/{run_id}/cancel")
 async def agent_deep_cancel(run_id: str):
-    event = _deep_cancel_events.get(run_id)
-    if event is None:
+    record = _deep_runs.get_for_owner(run_id, get_current_user_id())
+    if record is None or record.status != "running":
         raise HTTPException(status_code=404, detail="DeepResearch run is not active")
-    event.set()
+    record.cancel_event.set()
     return {"ok": True, "run_id": run_id}
 
 
@@ -1816,7 +2037,10 @@ async def agent_deep_history_get(session_id: str):
 async def agent_deep_history_upsert(session_id: str, req: DeepResearchHistoryUpsert):
     if session_id != req.id:
         raise HTTPException(status_code=400, detail="Session ID does not match request body")
-    return upsert_deep_research_session(req.model_dump())
+    try:
+        return upsert_deep_research_session(req.model_dump())
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @app.delete("/api/agent/deep-history/{session_id}")
@@ -1876,6 +2100,12 @@ async def skills_delete(skill_id: str):
     store = _get_skill_store()
     store.delete(skill_id)
     return {"ok": True}
+
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe for Docker healthchecks (no auth, no /api/ prefix)."""
+    return {"status": "ok"}
 
 
 @app.get("/api/harness/status")
@@ -1949,6 +2179,23 @@ async def evals_agent_results():
     return _json.loads(path.read_text(encoding="utf-8"))
 
 
+# ── Frontend static serving (production, same-origin) ─────────────────────────
+# Registered last so API routes keep precedence. When the frontend build output
+# exists, serve it directly and fall back to index.html for client-side routes.
+if Path(FRONTEND_DIST_DIR).is_dir():
+    assets_dir = os.path.join(FRONTEND_DIST_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        requested = os.path.join(FRONTEND_DIST_DIR, full_path)
+        if full_path and os.path.isfile(requested):
+            return FileResponse(requested)
+        return FileResponse(os.path.join(FRONTEND_DIST_DIR, "index.html"))
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=UVICORN_RELOAD)

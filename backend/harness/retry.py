@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+def _exception_chain(exc: BaseException) -> str:
+    """Return bounded transport causes without serialising request headers."""
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(parts) < 5:
+        seen.add(id(current))
+        message = str(current).replace("\n", " ").strip()[:300]
+        parts.append(f"{type(current).__name__}: {message}")
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -203,7 +216,12 @@ async def async_retry(
                 else:
                     log = logger.error if is_last and retryable else logger.warning
                     prefix = "retry exhausted" if is_last and retryable else "non-retryable call"
-                    log("[%s] '%s' failed: %s", prefix, label, exc)
+                    log(
+                        "[%s] '%s' failed: %s",
+                        prefix,
+                        label,
+                        _exception_chain(exc),
+                    )
                 raise
 
             delay = policy.delay_for(attempt)

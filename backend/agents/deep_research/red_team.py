@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -16,7 +15,10 @@ from typing import TYPE_CHECKING
 from agents.deep_research.prompts import RED_TEAM_PROMPT
 from agents.deep_research.budget import ResearchBudget
 from agents.deep_research.evidence import Evidence
-from agents.deep_research.model_runtime import apply_role_options
+from agents.deep_research.model_runtime import (
+    apply_role_options,
+    collect_streamed_text_completion,
+)
 from agents.deep_research.state import (
     Critique,
     CritiqueCategory,
@@ -118,20 +120,20 @@ async def red_team_review(
             "max_tokens": 8192,
             "response_format": {"type": "json_object"},
         }, "red_team")
-        return await asyncio.wait_for(
-            client.chat.completions.create(**request_options),
-            timeout=timeout_seconds,
+        return await collect_streamed_text_completion(
+            client,
+            request_options,
+            timeout_seconds=timeout_seconds,
         )
 
     resp = await async_retry(_call, policy=policy, circuit=circuit, label="RedTeam/llm")
-    content = resp.choices[0].message.content or ""
+    content = resp.content or ""
     if budget is not None:
-        usage = getattr(resp, "usage", None)
         budget.charge_llm(
             role="red_team",
             model=model,
-            input_tokens=_usage_int(usage, "prompt_tokens"),
-            output_tokens=_usage_int(usage, "completion_tokens"),
+            input_tokens=resp.input_tokens,
+            output_tokens=resp.output_tokens,
         )
     try:
         data = json.loads(content)

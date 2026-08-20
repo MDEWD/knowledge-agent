@@ -62,6 +62,13 @@ class BudgetExhaustedOrchestrator(FakeOrchestrator):
         raise ResearchBudgetExceeded(["output_tokens 11>10"])
 
 
+class TruncatedFinalOrchestrator(FakeOrchestrator):
+    async def _final_report_stream(self, brief, notes, draft):
+        self.calls.append("final")
+        yield "# incomplete [source](https://exam"
+        raise RuntimeError("final report reached output-token limit")
+
+
 @pytest.mark.asyncio
 async def test_langgraph_checkpoint_resumes_completed_run_without_repeating_nodes(
     tmp_path,
@@ -162,3 +169,28 @@ async def test_budget_exhaustion_returns_checkpointed_draft_without_final_llm(tm
         event.get("type") == "report_replace" and event.get("content") == "# draft"
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_truncated_final_stream_replaces_partial_text_with_complete_draft(tmp_path):
+    fake = TruncatedFinalOrchestrator()
+    runtime = DeepResearchGraphRuntime(
+        fake,
+        checkpoint_path=tmp_path / "truncated.sqlite",
+    )
+
+    events = [
+        event
+        async for event in runtime.run_stream("question", run_id="truncated-1")
+    ]
+
+    assert any(
+        event.get("type") == "text"
+        and "incomplete" in event.get("content", "")
+        for event in events
+    )
+    assert any(
+        event.get("type") == "report_replace" and event.get("content") == "# grounded draft"
+        for event in events
+    )
+    assert events[-1]["type"] == "done"

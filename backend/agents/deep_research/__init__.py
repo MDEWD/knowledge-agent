@@ -1,5 +1,5 @@
 """
-DeepResearch 融合模块: 在 knowledge-agent 内复刻 DeepResearch 项目的
+DeepResearch 融合模块: 在 zhiyan-agent 内复刻 DeepResearch 项目的
 「自进化 + 对抗降噪」循环(简报 → 初稿 → supervisor think/conduct/refine →
 red_team → evaluator 评分 → final_report), 并适配 AsyncOpenAI(DeepSeek)。
 

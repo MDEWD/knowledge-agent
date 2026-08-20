@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from config import DEFAULT_USER_ID
+from auth.context import get_current_user_id
 from storage.mysql_db import ensure_user, get_pool
 
 
@@ -33,9 +33,10 @@ def _public_id(session_id: str, index: int, value) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{session_id}:{index}:{candidate}"))
 
 
-def get_latest_session() -> dict | None:
+def get_latest_session(user_id: str | None = None) -> dict | None:
+    user_id = user_id or get_current_user_id()
     with get_pool().connection() as connection, connection.cursor() as cursor:
-        ensure_user(cursor)
+        ensure_user(cursor, user_id)
         cursor.execute(
             """
             SELECT id, title, model_name, created_at, updated_at
@@ -44,7 +45,7 @@ def get_latest_session() -> dict | None:
             ORDER BY updated_at DESC
             LIMIT 1
             """,
-            (DEFAULT_USER_ID,),
+            (user_id,),
         )
         session = cursor.fetchone()
         if session is None:
@@ -79,7 +80,13 @@ def get_latest_session() -> dict | None:
     }
 
 
-def save_session(session_id: str | None, messages: list[dict], model: str) -> dict:
+def save_session(
+    session_id: str | None,
+    messages: list[dict],
+    model: str,
+    user_id: str | None = None,
+) -> dict:
+    user_id = user_id or get_current_user_id()
     session_id = session_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     first_user = next(
@@ -88,7 +95,7 @@ def save_session(session_id: str | None, messages: list[dict], model: str) -> di
     )
     title = first_user[:100] or "New Chat"
     with get_pool().connection() as connection, connection.cursor() as cursor:
-        ensure_user(cursor)
+        ensure_user(cursor, user_id)
         cursor.execute(
             """
             INSERT INTO chat_sessions
@@ -98,7 +105,7 @@ def save_session(session_id: str | None, messages: list[dict], model: str) -> di
                 title = VALUES(title), model_name = VALUES(model_name), status = 'active',
                 last_message_at = VALUES(last_message_at), updated_at = VALUES(updated_at)
             """,
-            (session_id, DEFAULT_USER_ID, title, model, now, now, now),
+            (session_id, user_id, title, model, now, now, now),
         )
         cursor.execute("DELETE FROM chat_messages WHERE session_id = %s", (session_id,))
         rows = []
@@ -134,10 +141,11 @@ def save_session(session_id: str | None, messages: list[dict], model: str) -> di
     return {"id": session_id, "title": title, "model": model, "messages": messages}
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, user_id: str | None = None) -> bool:
+    user_id = user_id or get_current_user_id()
     with get_pool().connection() as connection, connection.cursor() as cursor:
         cursor.execute(
             "DELETE FROM chat_sessions WHERE id = %s AND user_id = %s",
-            (session_id, DEFAULT_USER_ID),
+            (session_id, user_id),
         )
         return cursor.rowcount > 0

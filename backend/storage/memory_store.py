@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 
-from config import DATA_PATH
+from auth.context import user_data_path
 from storage.mysql_db import mysql_enabled
-
-_MEMORY_FILE = DATA_PATH / "user_memory.json"
 
 _DEFAULT: dict = {
     "interests": [],
@@ -29,11 +27,12 @@ def load() -> dict:
 
 
 def load_legacy_file() -> dict:
-    _MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not _MEMORY_FILE.exists():
+    memory_file = user_data_path("user_memory.json")
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    if not memory_file.exists():
         return _empty()
     try:
-        payload = json.loads(_MEMORY_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(memory_file.read_text(encoding="utf-8"))
         return payload if isinstance(payload, dict) else _empty()
     except (OSError, json.JSONDecodeError):
         return _empty()
@@ -47,8 +46,9 @@ def save(mem: dict) -> None:
 
 
 def save_legacy_file(mem: dict) -> None:
-    _MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _MEMORY_FILE.write_text(json.dumps(mem, ensure_ascii=False, indent=2), encoding="utf-8")
+    memory_file = user_data_path("user_memory.json")
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text(json.dumps(mem, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def reset() -> dict:

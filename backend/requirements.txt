@@ -17,6 +17,8 @@ reportlab>=4.0.0
 python-docx>=1.0.0
 python-multipart>=0.0.9
 PyMySQL==1.1.1
+bcrypt>=4.2.0
+PyJWT>=2.9.0
 langfuse>=2.0.0
 mcp>=1.0.0
 tavily-python>=0.5.0

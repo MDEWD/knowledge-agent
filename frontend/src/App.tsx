@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import VideoInput from './components/VideoInput'
 import VideoLibrary from './components/VideoLibrary'
 import AiPanel from './components/AiPanel'
@@ -9,10 +9,14 @@ import DeepResearchPanel from './components/DeepResearchPanel'
 import MemorySidebar from './components/MemorySidebar'
 import NoteImportPanel from './components/NoteImportPanel'
 import DeepResearchHistorySidebar from './components/DeepResearchHistorySidebar'
-import { fetchVideos, fetchImportedNotes } from './api/client'
-import type { ActiveTab, ImportedNote, Video } from './types'
+import AuthPage from './components/AuthPage'
+import AdminPanel from './components/AdminPanel'
+import { fetchVideos, fetchImportedNotes, fetchCurrentUser, refreshAuthSession, logoutAuthSession } from './api/client'
+import type { ActiveTab, AuthUser, ImportedNote, Video } from './types'
 
 export default function App() {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
   const [videos, setVideos] = useState<Video[]>([])
   const [importedNotes, setImportedNotes] = useState<ImportedNote[]>([])
   const [activeTab, setActiveTab] = useState<ActiveTab>('add')
@@ -37,9 +41,39 @@ export default function App() {
   }, [isDark])
 
   useEffect(() => {
+    let cancelled = false
+    const restore = async () => {
+      try {
+        let user: AuthUser
+        try {
+          user = await fetchCurrentUser()
+        } catch {
+          user = await refreshAuthSession()
+        }
+        if (!cancelled) setAuthUser(user)
+      } catch {
+        if (!cancelled) setAuthUser(null)
+      } finally {
+        if (!cancelled) setAuthLoading(false)
+      }
+    }
+    void restore()
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!authUser) return
     fetchVideos().then(setVideos).catch(console.error)
     fetchImportedNotes().then(setImportedNotes).catch(console.error)
-  }, [])
+  }, [authUser?.id])
+
+  useEffect(() => {
+    if (!authUser) return
+    const interval = window.setInterval(() => {
+      refreshAuthSession().then(setAuthUser).catch(() => setAuthUser(null))
+    }, 20 * 60 * 1000)
+    return () => window.clearInterval(interval)
+  }, [authUser?.id])
 
   const handleNewVideo = (video: Video) => {
     setVideos((prev) => {
@@ -70,6 +104,26 @@ export default function App() {
     setDeepHistoryRefreshKey((value) => value + 1)
   }
 
+  const handleDeepRunningChange = useCallback((isRunning: boolean) => {
+    setDeepResearchRunning(isRunning)
+    // After a full browser refresh, the DeepResearch panel reconnects in the
+    // background. Bring the user back to the live run instead of the default tab.
+    if (isRunning) setActiveTab('deep')
+  }, [])
+
+  const handleLogout = async () => {
+    try {
+      await logoutAuthSession()
+    } finally {
+      setAuthUser(null)
+      setVideos([])
+      setImportedNotes([])
+      setSelectedVideo(null)
+      setActiveDeepSessionId(null)
+      setActiveTab('add')
+    }
+  }
+
   const TABS: { id: ActiveTab; label: string; disabled?: boolean }[] = [
     { id: 'add', label: '添加视频' },
     { id: 'import', label: '导入笔记' },
@@ -77,14 +131,27 @@ export default function App() {
     { id: 'ai', label: 'AI 对话' },
     { id: 'deep', label: '深度研究' },
     { id: 'stats', label: '统计' },
+    ...(authUser?.role === 'admin' ? [{ id: 'admin' as ActiveTab, label: '用户管理' }] : []),
   ]
+
+  if (authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-900 text-sm text-gray-500">
+        <div className="flex items-center gap-3"><span className="h-5 w-5 animate-spin rounded-full border-2 border-gray-700 border-t-cyan-400" />正在恢复登录状态…</div>
+      </div>
+    )
+  }
+
+  if (!authUser) {
+    return <AuthPage onAuthenticated={setAuthUser} isDark={isDark} onToggleTheme={() => setIsDark((value) => !value)} />
+  }
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-gray-900 text-white">
       {/* Global navigation */}
       <header className="flex h-14 shrink-0 items-stretch border-b border-gray-800">
         <div className="flex w-72 shrink-0 items-center px-5">
-          <h1 className="text-base font-bold text-white">智能 Agent 工作台</h1>
+          <h1 className="text-base font-bold text-white">知研 Agent</h1>
         </div>
         <nav className="flex min-w-0 flex-1 overflow-x-auto px-4">
           {TABS.map((tab) => (
@@ -107,13 +174,25 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <button
-          onClick={() => setIsDark((v) => !v)}
-          className="mx-4 self-center text-lg leading-none text-gray-500 transition-colors hover:text-gray-300"
-          title={isDark ? '切换到浅色模式' : '切换到深色模式'}
-        >
-          {isDark ? '☀️' : '🌙'}
-        </button>
+        <div className="flex shrink-0 items-center gap-2 px-4">
+          <div className="hidden min-w-0 text-right lg:block">
+            <p className="max-w-40 truncate text-xs font-medium text-gray-300">{authUser.display_name || authUser.email}</p>
+            <p className="max-w-40 truncate text-[10px] text-gray-600">{authUser.email}</p>
+          </div>
+          <button
+            onClick={() => setIsDark((v) => !v)}
+            className="rounded-lg px-2 py-2 text-lg leading-none text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
+            title={isDark ? '切换到浅色模式' : '切换到深色模式'}
+          >
+            {isDark ? '☀️' : '🌙'}
+          </button>
+          <button
+            onClick={() => void handleLogout()}
+            className="rounded-lg border border-gray-800 px-3 py-2 text-xs text-gray-500 transition hover:border-gray-700 hover:bg-gray-800 hover:text-gray-300"
+          >
+            退出
+          </button>
+        </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -158,7 +237,7 @@ export default function App() {
               sessionSelectionKey={deepSessionSelectionKey}
               onSessionSaved={handleDeepSessionSaved}
               onNewSession={handleNewDeepSession}
-              onRunningChange={setDeepResearchRunning}
+              onRunningChange={handleDeepRunningChange}
             />
           </div>
           {activeTab === 'add' && (
@@ -190,6 +269,7 @@ export default function App() {
             </div>
           )}
           {activeTab === 'stats' && <StatsPanel />}
+          {activeTab === 'admin' && authUser.role === 'admin' && <AdminPanel currentUser={authUser} />}
           {activeTab === 'import' && (
             <div className="h-full overflow-hidden">
               <NoteImportPanel onNoteAdded={() => fetchImportedNotes().then(setImportedNotes).catch(console.error)} />

@@ -46,7 +46,7 @@ def render_pdf(title: str, content: str) -> bytes:
         topMargin=22 * mm,
         bottomMargin=20 * mm,
         title=title or "Deep Research",
-        author="Knowledge Agent DeepResearch",
+        author="知研 Agent DeepResearch",
     )
     styles = {
         "title": ParagraphStyle(
@@ -121,7 +121,7 @@ def render_pdf(title: str, content: str) -> bytes:
     story = [
         Paragraph(_inline(title.strip() or "Deep Research"), styles["title"]),
         Paragraph(
-            f"Knowledge Agent DeepResearch · {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"知研 Agent DeepResearch · {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             styles["meta"],
         ),
     ]
@@ -131,7 +131,7 @@ def render_pdf(title: str, content: str) -> bytes:
         canvas.saveState()
         canvas.setFont(font_name, 8)
         canvas.setFillColor(colors.HexColor("#64748B"))
-        canvas.drawString(20 * mm, 10 * mm, "Knowledge Agent · DeepResearch")
+        canvas.drawString(20 * mm, 10 * mm, "知研 Agent · DeepResearch")
         canvas.drawRightString(A4[0] - 20 * mm, 10 * mm, f"第 {document.page} 页")
         canvas.restoreState()
 

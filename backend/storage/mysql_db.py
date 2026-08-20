@@ -13,7 +13,6 @@ from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
 
 from config import (
-    DEFAULT_USER_ID,
     MYSQL_DATABASE,
     MYSQL_HOST,
     MYSQL_PASSWORD,
@@ -103,12 +102,15 @@ def mysql_enabled() -> bool:
     return bool(os.environ.get("MYSQL_PASSWORD", MYSQL_PASSWORD))
 
 
-def ensure_user(cursor, user_id: str = DEFAULT_USER_ID) -> None:
+def ensure_user(cursor, user_id: str | None = None) -> None:
+    from auth.context import get_current_user_id
+
+    user_id = user_id or get_current_user_id()
     cursor.execute(
         """
         INSERT INTO users (id, username, display_name, status)
         VALUES (%s, %s, %s, 'active')
-        ON DUPLICATE KEY UPDATE status = 'active'
+        ON DUPLICATE KEY UPDATE id = VALUES(id)
         """,
         (user_id, user_id, "本地用户" if user_id == "local-user" else user_id),
     )

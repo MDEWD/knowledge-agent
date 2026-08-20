@@ -120,7 +120,7 @@ def lane(rect: tuple[int, int, int, int], title: str, color: str, fill: str) -> 
 
 
 # Header
-center_text((0, 18, W, 92), "智能 Agent 工作台 · 系统架构", size=58, bold=True)
+center_text((0, 18, W, 92), "知研 Agent · 系统架构", size=58, bold=True)
 center_text(
     (0, 82, W, 126),
     "RAG + Multi-Agent DeepResearch + Memory + Agent Skills",

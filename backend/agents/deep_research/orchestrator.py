@@ -33,6 +33,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, AsyncGenerator
 
+from auth.context import user_data_path
 from agents.deep_research.evaluator import EvaluationResult, evaluate_draft_quality
 from agents.deep_research.budget import ResearchBudget, ResearchBudgetExceeded
 from agents.deep_research.prompts import (
@@ -46,7 +47,10 @@ from agents.deep_research.prompts import (
 from agents.deep_research.red_team import red_team_review
 from agents.deep_research.sub_researcher import SubResearcher
 from agents.deep_research.model_config import DeepResearchModels
-from agents.deep_research.model_runtime import apply_role_options
+from agents.deep_research.model_runtime import (
+    apply_role_options,
+    collect_streamed_text_completion,
+)
 from agents.deep_research.search_policy import SearchQualityPolicy
 from agents.deep_research.evidence import Evidence, EvidenceLedger
 from agents.deep_research.state import (
@@ -62,19 +66,24 @@ from agents.deep_research.state import (
 from agents.deep_research.tool_runtime import ToolRuntime
 from agents.deep_research.cancellation import await_with_cancel
 from config import (
-    DATA_PATH,
+    DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS,
+    DEEP_RESEARCH_FINAL_MAX_TOKENS,
     DEEP_RESEARCH_LLM_TIMEOUT_SECONDS,
     DEEP_RESEARCH_MAX_CONCURRENT,
     DEEP_RESEARCH_MAX_ITERATIONS,
     DEEP_RESEARCH_MIN_REPAIR_SCORE,
     DEEP_RESEARCH_RED_TEAM_MAX,
 )
-from harness.retry import CircuitBreaker, RetryPolicy, async_retry
+from harness.retry import CircuitBreaker, CircuitOpenError, RetryPolicy, async_retry
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+class IncompleteFinalReportError(RuntimeError):
+    """The provider stopped the final report before completing it."""
 
 
 def _usage_int(usage, field: str) -> int:
@@ -285,6 +294,33 @@ class DeepResearchOrchestrator:
         )
         return response
 
+    async def _llm_text(self, **kwargs):
+        """Generate text over SSE so proxy keep-alives remain visible."""
+        role = kwargs.pop("_role", "deep_research")
+        request_options = apply_role_options(kwargs, role)
+
+        async def _call():
+            return await collect_streamed_text_completion(
+                self.client,
+                request_options,
+                timeout_seconds=self.llm_timeout_seconds,
+                cancel_event=self._cancel_event,
+            )
+
+        response = await async_retry(
+            _call,
+            policy=self._policy,
+            circuit=self._circuit,
+            label=f"DeepResearch/{role}",
+        )
+        self.budget.charge_llm(
+            role=role,
+            model=str(request_options.get("model", self.model)),
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+        return response
+
     async def _llm_json(
         self,
         prompt: str,
@@ -310,44 +346,87 @@ class DeepResearchOrchestrator:
             return {}
 
     async def _llm_stream(self, prompt: str, *, model: str):
-        """流式生成最终报告, yield token chunks。"""
-        request_options = apply_role_options({
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.5,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }, "final_writer")
-        stream = await await_with_cancel(
-            self.client.chat.completions.create(**request_options),
-            timeout_seconds=self.llm_timeout_seconds,
-            cancel_event=self._cancel_event,
-        )
-        iterator = stream.__aiter__()
-        final_input_tokens = 0
-        final_output_tokens = 0
-        while True:
-            try:
-                chunk = await await_with_cancel(
-                    anext(iterator),
-                    timeout_seconds=self.llm_timeout_seconds,
-                    cancel_event=self._cancel_event,
-                )
-            except StopAsyncIteration:
+        """流式生成最终报告；达到单段上限时从断点继续。"""
+        generated_parts: list[str] = []
+        messages = [{"role": "user", "content": prompt}]
+        total_input_tokens = 0
+        total_output_tokens = 0
+
+        for continuation_index in range(DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS + 1):
+            request_options = apply_role_options({
+                "model": model,
+                "messages": messages,
+                "temperature": 0.5,
+                "max_tokens": DEEP_RESEARCH_FINAL_MAX_TOKENS,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }, "final_writer")
+            stream = await await_with_cancel(
+                self.client.chat.completions.create(**request_options),
+                timeout_seconds=self.llm_timeout_seconds,
+                cancel_event=self._cancel_event,
+            )
+            iterator = stream.__aiter__()
+            segment_input_tokens = 0
+            segment_output_tokens = 0
+            finish_reason: str | None = None
+            while True:
+                try:
+                    chunk = await await_with_cancel(
+                        anext(iterator),
+                        timeout_seconds=self.llm_timeout_seconds,
+                        cancel_event=self._cancel_event,
+                    )
+                except StopAsyncIteration:
+                    break
+                choice = chunk.choices[0] if chunk.choices else None
+                delta = choice.delta.content if choice else None
+                if delta:
+                    generated_parts.append(delta)
+                    yield delta
+                if choice and choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                if chunk.usage:
+                    segment_input_tokens = _usage_int(chunk.usage, "prompt_tokens")
+                    segment_output_tokens = _usage_int(chunk.usage, "completion_tokens")
+
+            total_input_tokens += segment_input_tokens
+            total_output_tokens += segment_output_tokens
+            self.budget.charge_llm(
+                role="final_writer",
+                model=model,
+                input_tokens=segment_input_tokens,
+                output_tokens=segment_output_tokens,
+            )
+            if finish_reason != "length":
+                self._last_final_input = total_input_tokens
+                self._last_final_output = total_output_tokens
+                return
+            if continuation_index >= DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS:
                 break
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                yield delta
-            if chunk.usage:
-                final_input_tokens = _usage_int(chunk.usage, "prompt_tokens")
-                final_output_tokens = _usage_int(chunk.usage, "completion_tokens")
-        self._last_final_input = final_input_tokens
-        self._last_final_output = final_output_tokens
-        self.budget.charge_llm(
-            role="final_writer",
-            model=model,
-            input_tokens=final_input_tokens,
-            output_tokens=final_output_tokens,
+
+            logger.warning(
+                "[DeepResearch] FinalWriter reached segment token limit; "
+                "continuing (%d/%d)",
+                continuation_index + 1,
+                DEEP_RESEARCH_FINAL_MAX_CONTINUATIONS,
+            )
+            messages = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "".join(generated_parts)},
+                {
+                    "role": "user",
+                    "content": (
+                        "请从上文中断处直接继续报告，不要重复已有文字。"
+                        "完成所有剩余章节并确保 Markdown、引用和链接闭合。"
+                    ),
+                },
+            ]
+
+        self._last_final_input = total_input_tokens
+        self._last_final_output = total_output_tokens
+        raise IncompleteFinalReportError(
+            "FinalWriter exhausted all continuation segments before completing the report"
         )
 
     # ------------------------------------------------------------------
@@ -397,14 +476,25 @@ class DeepResearchOrchestrator:
         )
         # 报告正文可能很长。直接生成 Markdown，避免被 token 上限截断后形成
         # 不完整 JSON，继而触发一次无意义的重试和二次 LLM 调用。
-        resp = await self._llm(
-            model=self.models.draft,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=8192,
-            _role="draft_writer",
-        )
-        return (resp.choices[0].message.content or brief).strip()
+        try:
+            resp = await self._llm_text(
+                model=self.models.draft,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=8192,
+                _role="draft_writer",
+            )
+        except Exception as exc:
+            if isinstance(exc, ResearchBudgetExceeded):
+                raise
+            if self._policy.is_retryable(exc) or isinstance(exc, CircuitOpenError):
+                logger.error(
+                    "[DeepResearch] DraftWriter transport unavailable; "
+                    "continuing with the research brief as the initial draft"
+                )
+                return brief
+            raise
+        return (resp.content or brief).strip()
 
     async def _refine_draft(self, brief: str, findings: str, draft: str) -> str:
         import datetime as _dt
@@ -907,7 +997,7 @@ class DeepResearchOrchestrator:
             self._sub_researcher._cancel_event = cancel_event
             runtime = DeepResearchGraphRuntime(
                 self,
-                checkpoint_path=DATA_PATH / "deep_research_checkpoints.sqlite",
+                checkpoint_path=user_data_path("deep_research_checkpoints.sqlite"),
                 cancel_event=cancel_event,
             )
             async for event in runtime.run_stream(enriched_task, run_id=run_id):

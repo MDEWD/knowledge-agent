@@ -13,12 +13,44 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
-from config import DATA_PATH, DEFAULT_USER_ID
+from auth.context import get_current_user_id, user_data_path
 from storage.mysql_db import ensure_user, get_pool, mysql_enabled
 
-_HISTORY_FILE = DATA_PATH / "deep_research_history.json"
 _LOCK = threading.RLock()
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+
+def append_pending_turn(turns: list[dict], question: str) -> tuple[list[dict], int]:
+    """Append one run as a distinct conversation turn.
+
+    Question text is not a stable identity: a user may intentionally ask the
+    same follow-up twice. The run owns the returned zero-based index instead.
+    """
+    next_turns = [dict(turn) for turn in turns]
+    next_turns.append({"question": question, "answer": ""})
+    return next_turns, len(next_turns) - 1
+
+
+def complete_turn(
+    turns: list[dict],
+    turn_index: int,
+    *,
+    question: str,
+    answer: str,
+) -> list[dict]:
+    """Complete the turn allocated to a run without replacing another turn."""
+    next_turns = [dict(turn) for turn in turns]
+    while len(next_turns) <= turn_index:
+        next_turns.append({"question": "", "answer": ""})
+    next_turns[turn_index] = {"question": question, "answer": answer}
+    return next_turns
+# Test/migration compatibility hook. Runtime storage remains tenant-scoped when
+# this value is ``None``.
+_HISTORY_FILE = None
+
+
+def _history_file():
+    return _HISTORY_FILE or user_data_path("deep_research_history.json")
 
 
 def _now() -> str:
@@ -26,21 +58,23 @@ def _now() -> str:
 
 
 def _load_unlocked() -> list[dict]:
-    _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not _HISTORY_FILE.exists():
+    history_file = _history_file()
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    if not history_file.exists():
         return []
     try:
-        payload = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(history_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     return payload if isinstance(payload, list) else []
 
 
 def _save_unlocked(sessions: list[dict]) -> None:
-    _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = _HISTORY_FILE.with_suffix(".tmp")
+    history_file = _history_file()
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = history_file.with_suffix(".tmp")
     temp_path.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(_HISTORY_FILE)
+    temp_path.replace(history_file)
 
 
 def list_sessions() -> list[dict]:
@@ -157,8 +191,9 @@ def _score(value):
 
 
 def _list_mysql() -> list[dict]:
+    user_id = get_current_user_id()
     with get_pool().connection() as connection, connection.cursor() as cursor:
-        ensure_user(cursor)
+        ensure_user(cursor, user_id)
         cursor.execute(
             """
             SELECT s.id, s.title, s.metadata_json, s.created_at, s.updated_at,
@@ -169,7 +204,7 @@ def _list_mysql() -> list[dict]:
             GROUP BY s.id, s.title, s.metadata_json, s.created_at, s.updated_at
             ORDER BY s.updated_at DESC
             """,
-            (DEFAULT_USER_ID,),
+            (user_id,),
         )
         rows = cursor.fetchall()
     return [
@@ -186,6 +221,7 @@ def _list_mysql() -> list[dict]:
 
 
 def _get_mysql(session_id: str) -> dict | None:
+    user_id = get_current_user_id()
     with get_pool().connection() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
@@ -193,7 +229,7 @@ def _get_mysql(session_id: str) -> dict | None:
             FROM research_sessions
             WHERE id = %s AND user_id = %s
             """,
-            (session_id, DEFAULT_USER_ID),
+            (session_id, user_id),
         )
         session = cursor.fetchone()
         if session is None:
@@ -248,12 +284,20 @@ def _get_mysql(session_id: str) -> dict | None:
 
 
 def _upsert_mysql(session: dict) -> dict:
+    user_id = get_current_user_id()
     session_id = str(session["id"])
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     metadata = json.dumps({"run_id": session.get("run_id") or ""}, ensure_ascii=False)
     turns = list(session.get("turns") or [])
     with get_pool().connection() as connection, connection.cursor() as cursor:
-        ensure_user(cursor)
+        ensure_user(cursor, user_id)
+        cursor.execute(
+            "SELECT user_id FROM research_sessions WHERE id=%s FOR UPDATE",
+            (session_id,),
+        )
+        owner = cursor.fetchone()
+        if owner and owner["user_id"] != user_id:
+            raise PermissionError("research session belongs to another user")
         cursor.execute(
             """
             INSERT INTO research_sessions
@@ -263,7 +307,7 @@ def _upsert_mysql(session: dict) -> dict:
                 title = VALUES(title), status = 'completed',
                 metadata_json = VALUES(metadata_json), updated_at = VALUES(updated_at)
             """,
-            (session_id, DEFAULT_USER_ID, session.get("title") or "Deep Research", metadata, now, now),
+            (session_id, user_id, session.get("title") or "Deep Research", metadata, now, now),
         )
         if turns:
             cursor.executemany(
@@ -370,9 +414,10 @@ def _upsert_mysql(session: dict) -> dict:
 
 
 def _delete_mysql(session_id: str) -> bool:
+    user_id = get_current_user_id()
     with get_pool().connection() as connection, connection.cursor() as cursor:
         cursor.execute(
             "DELETE FROM research_sessions WHERE id = %s AND user_id = %s",
-            (session_id, DEFAULT_USER_ID),
+            (session_id, user_id),
         )
         return cursor.rowcount > 0

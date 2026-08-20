@@ -4,7 +4,7 @@
 SEARCH_BACKEND 路由 KB / Tavily / 混合), 最后把对话压缩成清洗过的研究笔记,
 回传给 supervisor 作为一条 ToolMessage。
 
-该模块直接复用 knowledge-agent 现有的 BaseAgent 风格: openai.AsyncOpenAI,
+该模块直接复用 zhiyan-agent 现有的 BaseAgent 风格: openai.AsyncOpenAI,
 不依赖 langchain/langgraph。
 """
 from __future__ import annotations

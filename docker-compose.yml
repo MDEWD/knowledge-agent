@@ -1,0 +1,91 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: multi_agent_platform
+      # Least-privilege app account; the image grants it rights only on MYSQL_DATABASE.
+      MYSQL_USER: ${MYSQL_USER:-zhiyan}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # MySQL
+      - MYSQL_HOST=db
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=multi_agent_platform
+      - MYSQL_USER=${MYSQL_USER:-zhiyan}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      # Timezone for the scheduler cron jobs (weekly review / dream cycle)
+      - TZ=${TZ:-Asia/Shanghai}
+      # Keep false in production. Opt out only behind a TLS-intercepting dev proxy.
+      - SSL_NO_VERIFY=${SSL_NO_VERIFY:-false}
+      # LLM
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      # Auth
+      - AUTH_SECRET_KEY=${AUTH_SECRET_KEY}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-false}
+      - AUTH_ADMIN_EMAILS=${AUTH_ADMIN_EMAILS:-}
+      # CORS (same-origin deploys can leave empty)
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # SMTP
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-${SMTP_USERNAME}}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-知研 Agent}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - SMTP_USE_SSL=${SMTP_USE_SSL:-false}
+      # Research / search
+      - SEARCH_BACKEND=${SEARCH_BACKEND:-web_only}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      # Embeddings: downloaded on first boot, cached in the data volume
+      - EMBED_LOCAL_FILES_ONLY=${EMBED_LOCAL_FILES_ONLY:-false}
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - app_data:/app/data
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  mysql_data:
+  app_data:
+  caddy_data:
+  caddy_config:

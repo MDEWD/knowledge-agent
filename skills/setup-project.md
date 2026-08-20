@@ -1,6 +1,6 @@
 ---
 name: setup-project
-description: 一键配置「个人视频知识库 Agent」项目的完整本地环境，适用于 macOS 和 Windows 用户首次部署。检测前置依赖、创建虚拟环境、安装依赖、配置 .env、安装前端依赖并打印启动指引。
+description: 一键配置「知研 Agent」项目的完整本地环境，适用于 macOS 和 Windows 用户首次部署。检测前置依赖、创建虚拟环境、安装依赖、配置 .env、安装前端依赖并打印启动指引。
 argument-hint: "[--skip-frontend] [--skip-env]"
 disable-model-invocation: true
 allowed-tools: Bash Read Edit Write
