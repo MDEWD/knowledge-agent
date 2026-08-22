@@ -150,16 +150,16 @@ export default function App() {
     <div className="flex h-screen flex-col overflow-hidden bg-gray-900 text-white">
       {/* Global navigation */}
       <header className="flex h-14 shrink-0 items-stretch border-b border-gray-800">
-        <div className="flex w-72 shrink-0 items-center px-5">
-          <h1 className="text-base font-bold text-white">知研 Agent</h1>
+        <div className="flex shrink-0 items-center px-3 md:w-72 md:px-5">
+          <h1 className="whitespace-nowrap text-sm font-bold text-white md:text-base">知研 Agent</h1>
         </div>
-        <nav className="flex min-w-0 flex-1 overflow-x-auto px-4">
+        <nav className="flex min-w-0 flex-1 overflow-x-auto scrollbar-hide px-2 md:px-4">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               onClick={() => !tab.disabled && setActiveTab(tab.id)}
               disabled={tab.disabled}
-              className={`px-4 py-3.5 text-sm font-medium border-b-2 transition-colors -mb-px disabled:opacity-30 disabled:cursor-not-allowed ${
+              className={`px-4 py-3.5 text-sm font-medium whitespace-nowrap shrink-0 border-b-2 transition-colors -mb-px disabled:opacity-30 disabled:cursor-not-allowed ${
                 activeTab === tab.id
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-gray-500 hover:text-gray-300'
@@ -174,17 +174,26 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="flex shrink-0 items-center gap-2 px-4">
+        <div className="flex shrink-0 items-center gap-1.5 px-2 md:gap-2 md:px-4">
           <div className="hidden min-w-0 text-right lg:block">
             <p className="max-w-40 truncate text-xs font-medium text-gray-300">{authUser.display_name || authUser.email}</p>
             <p className="max-w-40 truncate text-[10px] text-gray-600">{authUser.email}</p>
           </div>
           <button
             onClick={() => setIsDark((v) => !v)}
-            className="rounded-lg px-2 py-2 text-lg leading-none text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
+            className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
             title={isDark ? '切换到浅色模式' : '切换到深色模式'}
           >
-            {isDark ? '☀️' : '🌙'}
+            {isDark ? (
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+              </svg>
+            ) : (
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
           </button>
           <button
             onClick={() => void handleLogout()}
