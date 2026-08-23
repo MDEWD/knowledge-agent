@@ -13,6 +13,7 @@ import DeepResearchHistorySidebar from './components/DeepResearchHistorySidebar'
 import AuthPage from './components/AuthPage'
 import AdminPanel from './components/AdminPanel'
 import { fetchVideos, fetchImportedNotes, fetchCurrentUser, refreshAuthSession, logoutAuthSession } from './api/client'
+import { isTabAllowed, readActiveTab, saveActiveTab } from './tabPersistence'
 import type { ActiveTab, AuthUser, ImportedNote, Video } from './types'
 
 export default function App() {
@@ -20,7 +21,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true)
   const [videos, setVideos] = useState<Video[]>([])
   const [importedNotes, setImportedNotes] = useState<ImportedNote[]>([])
-  const [activeTab, setActiveTab] = useState<ActiveTab>('add')
+  const [activeTab, setActiveTab] = useState<ActiveTab>(readActiveTab)
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null)
   const [selectedImportedNote, setSelectedImportedNote] = useState<ImportedNote | null>(null)
   const [prefillUrl, setPrefillUrl] = useState('')
@@ -28,7 +29,9 @@ export default function App() {
   const [deepSessionSelectionKey, setDeepSessionSelectionKey] = useState(0)
   const [deepHistoryRefreshKey, setDeepHistoryRefreshKey] = useState(0)
   const [deepResearchRunning, setDeepResearchRunning] = useState(false)
+  const [deepHistoryOpen, setDeepHistoryOpen] = useState(false)
   const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false)
+  const hasSelectedNote = Boolean(selectedVideo || selectedImportedNote)
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme')
     return saved ? saved === 'dark' : true
@@ -42,6 +45,20 @@ export default function App() {
     }
     localStorage.setItem('theme', isDark ? 'dark' : 'light')
   }, [isDark])
+
+  useEffect(() => {
+    saveActiveTab(activeTab)
+  }, [activeTab])
+
+  useEffect(() => {
+    if (authUser && !isTabAllowed(activeTab, authUser.role)) {
+      setActiveTab('add')
+    }
+  }, [activeTab, authUser])
+
+  useEffect(() => {
+    if (activeTab !== 'deep') setDeepHistoryOpen(false)
+  }, [activeTab])
 
   useEffect(() => {
     let cancelled = false
@@ -101,12 +118,14 @@ export default function App() {
     if (deepResearchRunning) return
     setActiveDeepSessionId(sessionId)
     setDeepSessionSelectionKey((value) => value + 1)
+    setDeepHistoryOpen(false)
   }
 
   const handleNewDeepSession = () => {
     if (deepResearchRunning) return
     setActiveDeepSessionId(null)
     setDeepSessionSelectionKey((value) => value + 1)
+    setDeepHistoryOpen(false)
   }
 
   const handleDeepSessionSaved = (sessionId: string) => {
@@ -230,7 +249,7 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         {/* Notes navigation only belongs to the notes workspace. */}
         {activeTab === 'note' && (
-          <aside className="flex w-72 shrink-0 flex-col border-r border-gray-800 p-4">
+          <aside className={`note-mobile-list ${hasSelectedNote ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-gray-800 p-4 md:w-72`}>
             <div className="flex-1 min-h-0">
               <VideoLibrary
                 videos={videos}
@@ -243,33 +262,44 @@ export default function App() {
           </aside>
         )}
         {activeTab === 'deep' && (
-          <DeepResearchHistorySidebar
-            activeSessionId={activeDeepSessionId}
-            refreshKey={deepHistoryRefreshKey}
-            disabled={deepResearchRunning}
-            onSelect={handleSelectDeepSession}
-            onNew={handleNewDeepSession}
-          />
+          <>
+            {deepHistoryOpen && <button type="button" aria-label="关闭研究会话" onClick={() => setDeepHistoryOpen(false)} className="deep-history-mobile-backdrop fixed inset-x-0 bottom-0 top-14 z-40 bg-black/40 backdrop-blur-[1px] md:hidden" />}
+            <DeepResearchHistorySidebar
+              activeSessionId={activeDeepSessionId}
+              refreshKey={deepHistoryRefreshKey}
+              disabled={deepResearchRunning}
+              mobileOpen={deepHistoryOpen}
+              onMobileClose={() => setDeepHistoryOpen(false)}
+              onSelect={handleSelectDeepSession}
+              onNew={handleNewDeepSession}
+            />
+          </>
         )}
 
         {/* Main */}
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main className={`${activeTab === 'note' && !hasSelectedNote ? 'hidden md:flex' : 'flex'} min-w-0 flex-1 flex-col`}>
 
         {/* Content */}
-        <div className="flex-1 overflow-hidden p-6 min-h-0">
+        <div className="flex-1 overflow-hidden p-3 min-h-0 md:p-6">
           {/* AiPanel always mounted to preserve chat history */}
           <div className={`h-full flex flex-col min-h-0 ${activeTab === 'ai' ? '' : 'hidden'}`}>
             <AiPanel suggestedVideo={selectedVideo} />
           </div>
           {/* DeepResearch always stays mounted so switching tabs does not lose a running report. */}
-          <div className={`h-full flex flex-col min-h-0 ${activeTab === 'deep' ? '' : 'hidden'}`}>
-            <DeepResearchPanel
-              sessionId={activeDeepSessionId}
-              sessionSelectionKey={deepSessionSelectionKey}
-              onSessionSaved={handleDeepSessionSaved}
-              onNewSession={handleNewDeepSession}
-              onRunningChange={handleDeepRunningChange}
-            />
+          <div className={`h-full flex-col min-h-0 ${activeTab === 'deep' ? 'flex' : 'hidden'}`}>
+            <button type="button" onClick={() => setDeepHistoryOpen(true)} className="deep-history-mobile-trigger mb-3 flex shrink-0 items-center justify-center gap-2 rounded-xl border border-gray-700 bg-gray-800/50 px-3 py-2.5 text-sm text-gray-300 md:hidden">
+              <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" className="h-4 w-4"><path d="M4 5h12M4 10h12M4 15h8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+              研究会话
+            </button>
+            <div className="min-h-0 flex-1">
+              <DeepResearchPanel
+                sessionId={activeDeepSessionId}
+                sessionSelectionKey={deepSessionSelectionKey}
+                onSessionSaved={handleDeepSessionSaved}
+                onNewSession={handleNewDeepSession}
+                onRunningChange={handleDeepRunningChange}
+              />
+            </div>
           </div>
           {activeTab === 'add' && (
             <div className="h-full overflow-y-auto pb-4">
@@ -286,16 +316,16 @@ export default function App() {
               </div>
             </div>
           )}
-          {activeTab === 'note' && selectedVideo && (
-            <NoteEditor
-              key={selectedVideo.id}
-              video={selectedVideo}
-              allVideos={videos}
-              onSelectVideo={handleSelectVideo}
-            />
-          )}
-          {activeTab === 'note' && selectedImportedNote && (
-            <ImportedNoteEditor note={selectedImportedNote} />
+          {activeTab === 'note' && hasSelectedNote && (
+            <div className="note-mobile-detail flex h-full min-h-0 flex-col">
+              <button type="button" onClick={() => { setSelectedVideo(null); setSelectedImportedNote(null) }} className="note-mobile-back mb-3 flex shrink-0 items-center gap-1.5 self-start rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-400 md:hidden">
+                <span aria-hidden="true">←</span> 返回笔记列表
+              </button>
+              <div className="min-h-0 flex-1">
+                {selectedVideo && <NoteEditor key={selectedVideo.id} video={selectedVideo} allVideos={videos} onSelectVideo={handleSelectVideo} />}
+                {selectedImportedNote && <ImportedNoteEditor note={selectedImportedNote} />}
+              </div>
+            </div>
           )}
           {activeTab === 'note' && !selectedVideo && !selectedImportedNote && (
             <div className="flex h-full items-center justify-center text-sm text-gray-500">
