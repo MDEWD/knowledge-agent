@@ -311,6 +311,9 @@ AUTH_CODE_MINUTES=10
 AUTH_CODE_RESEND_SECONDS=60
 AUTH_CODE_MAX_ATTEMPTS=5
 AUTH_ADMIN_EMAILS=admin@example.com
+# 两项同时配置时，空数据库首次启动会自动创建管理员
+DEFAULT_ADMIN_EMAIL=admin@example.com
+DEFAULT_ADMIN_PASSWORD=use-a-random-initial-password
 
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587

@@ -6,8 +6,9 @@ import NoteEditor from './components/NoteEditor'
 import StatsPanel from './components/StatsPanel'
 import RecommendationsPanel from './components/RecommendationsPanel'
 import DeepResearchPanel from './components/DeepResearchPanel'
-import MemorySidebar from './components/MemorySidebar'
+import GlobalMemoryDrawer from './components/GlobalMemoryDrawer'
 import NoteImportPanel from './components/NoteImportPanel'
+import ImportedNoteEditor from './components/ImportedNoteEditor'
 import DeepResearchHistorySidebar from './components/DeepResearchHistorySidebar'
 import AuthPage from './components/AuthPage'
 import AdminPanel from './components/AdminPanel'
@@ -21,11 +22,13 @@ export default function App() {
   const [importedNotes, setImportedNotes] = useState<ImportedNote[]>([])
   const [activeTab, setActiveTab] = useState<ActiveTab>('add')
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null)
+  const [selectedImportedNote, setSelectedImportedNote] = useState<ImportedNote | null>(null)
   const [prefillUrl, setPrefillUrl] = useState('')
   const [activeDeepSessionId, setActiveDeepSessionId] = useState<string | null>(null)
   const [deepSessionSelectionKey, setDeepSessionSelectionKey] = useState(0)
   const [deepHistoryRefreshKey, setDeepHistoryRefreshKey] = useState(0)
   const [deepResearchRunning, setDeepResearchRunning] = useState(false)
+  const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false)
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme')
     return saved ? saved === 'dark' : true
@@ -84,6 +87,13 @@ export default function App() {
 
   const handleSelectVideo = (video: Video) => {
     setSelectedVideo(video)
+    setSelectedImportedNote(null)
+    setActiveTab('note')
+  }
+
+  const handleSelectImportedNote = (note: ImportedNote) => {
+    setSelectedImportedNote(note)
+    setSelectedVideo(null)
     setActiveTab('note')
   }
 
@@ -119,6 +129,7 @@ export default function App() {
       setVideos([])
       setImportedNotes([])
       setSelectedVideo(null)
+      setSelectedImportedNote(null)
       setActiveDeepSessionId(null)
       setActiveTab('add')
     }
@@ -180,6 +191,18 @@ export default function App() {
             <p className="max-w-40 truncate text-[10px] text-gray-600">{authUser.email}</p>
           </div>
           <button
+            onClick={() => setMemoryDrawerOpen(true)}
+            className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-800 hover:text-purple-300"
+            title="长期记忆"
+            aria-label="打开长期记忆"
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9.5 4.5A3.5 3.5 0 0 0 6 8v.4A3.5 3.5 0 0 0 4.5 15a3.5 3.5 0 0 0 5 4.5" />
+              <path d="M14.5 4.5A3.5 3.5 0 0 1 18 8v.4a3.5 3.5 0 0 1 1.5 6.6 3.5 3.5 0 0 1-5 4.5" />
+              <path d="M9.5 4.5a3 3 0 0 1 5 0v15a3 3 0 0 1-5 0zM9.5 9H7.8M14.5 14h1.7" />
+            </svg>
+          </button>
+          <button
             onClick={() => setIsDark((v) => !v)}
             className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
             title={isDark ? '切换到浅色模式' : '切换到深色模式'}
@@ -214,10 +237,9 @@ export default function App() {
                 onDelete={(id) => setVideos((prev) => prev.filter((v) => v.id !== id))}
                 onSelectVideo={handleSelectVideo}
                 notes={importedNotes}
-                onSelectNote={() => setActiveTab('import')}
+                onSelectNote={handleSelectImportedNote}
               />
             </div>
-            <MemorySidebar />
           </aside>
         )}
         {activeTab === 'deep' && (
@@ -272,7 +294,10 @@ export default function App() {
               onSelectVideo={handleSelectVideo}
             />
           )}
-          {activeTab === 'note' && !selectedVideo && (
+          {activeTab === 'note' && selectedImportedNote && (
+            <ImportedNoteEditor note={selectedImportedNote} />
+          )}
+          {activeTab === 'note' && !selectedVideo && !selectedImportedNote && (
             <div className="flex h-full items-center justify-center text-sm text-gray-500">
               从左侧选择一条笔记
             </div>
@@ -287,6 +312,7 @@ export default function App() {
         </div>
         </main>
       </div>
+      <GlobalMemoryDrawer open={memoryDrawerOpen} onClose={() => setMemoryDrawerOpen(false)} />
     </div>
   )
 }

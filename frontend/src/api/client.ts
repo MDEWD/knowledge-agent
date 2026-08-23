@@ -413,6 +413,12 @@ export async function fetchImportedNotes(): Promise<ImportedNote[]> {
   return res.json()
 }
 
+export async function fetchImportedNote(id: string): Promise<ImportedNote & { content: string }> {
+  const res = await fetch(`${BASE}/notes/${id}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function deleteImportedNote(id: string): Promise<void> {
   const res = await fetch(`${BASE}/notes/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())

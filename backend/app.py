@@ -1,9 +1,12 @@
 import os
 import ssl
+from pathlib import Path
 
-from dotenv import load_dotenv
+from env_loader import load_runtime_environment
 
-load_dotenv(override=True)
+_BACKEND_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_DIR.parent
+load_runtime_environment(_BACKEND_DIR, _PROJECT_ROOT)
 
 # Never disable TLS certificate verification in production. Local dev behind a
 # TLS-intercepting proxy can opt out with SSL_NO_VERIFY=true in backend/.env.
@@ -18,7 +21,6 @@ import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import AsyncGenerator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -62,6 +64,7 @@ from extractors.youtube import get_transcript as yt_transcript
 from extractors.bilibili import get_transcript as bili_transcript
 from processors.insights import extract_insights, parse_category, is_mainly_chinese, translate_to_chinese
 from processors.rag_enhancer import rewrite_query, rerank, expand_queries, classify_intent, rerank_with_significance
+from processors.citations import select_cited_sources
 from storage.obsidian import save_to_obsidian, update_obsidian_note
 from storage.vector_store import add_document, add_note_document, delete_document, find_related, search
 from storage.video_db import add_video, delete_video, get_video, list_videos, update_video_note, batch_update_significance
@@ -127,6 +130,19 @@ def _sync_bm25_from_chroma() -> None:
         print(f"[BM25] Sync error: {e}")
 
 
+def _seed_default_admin() -> None:
+    """Create the configured bootstrap administrator on startup (idempotent)."""
+    try:
+        from auth.service import ensure_configured_admins, ensure_default_admin
+        promoted = ensure_configured_admins()
+        if promoted:
+            print(f"[admin] promoted {promoted} configured account(s)")
+        if ensure_default_admin():
+            print("[admin] default admin account created")
+    except Exception as exc:  # never block startup
+        print(f"[admin] default admin seed skipped: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _scheduler.add_job(
@@ -142,8 +158,9 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     _scheduler.start()
-    # Populate BM25 from Chroma on first startup after upgrade
+    # Seed the bootstrap administrator and populate BM25 on startup.
     loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _seed_default_admin)
     await loop.run_in_executor(None, _sync_bm25_from_chroma)
     try:
         yield
@@ -378,7 +395,9 @@ async def _process_note_file(
             encoding="utf-8",
         )
 
-        # Index in vector store: sentence-aware chunked for proper retrieval
+        # Index in BM25 by default. Loading SentenceTransformer here can
+        # terminate the Windows backend at native/OOM level for large PDFs;
+        # vector indexing is opt-in and the note remains searchable by text.
         note_meta = {
             "id": note_id,
             "title": title,
@@ -387,7 +406,12 @@ async def _process_note_file(
             "platform": "note",
         }
         full_text_for_index = f"{title}。{summary}\n\n{text}" if summary else f"{title}\n\n{text}"
-        await asyncio.to_thread(add_note_document, full_text_for_index, note_meta)
+        from config import NOTE_IMPORT_VECTOR_INDEX
+        if NOTE_IMPORT_VECTOR_INDEX:
+            await asyncio.to_thread(add_note_document, full_text_for_index, note_meta)
+        else:
+            from storage.vector_store import add_note_bm25_document
+            await asyncio.to_thread(add_note_bm25_document, full_text_for_index, note_meta)
 
         # Save to notes DB
         note_record = {
@@ -430,10 +454,11 @@ async def _process_note_file(
 # ── Chat: tools & system prompt ───────────────────────────────────────────────
 
 _CHAT_SYSTEM = """\
-你是用户的个人知识助手，拥有多种工具来帮助用户探索和利用他们的视频知识库。
+你是用户的个人知识助手，拥有多种工具来帮助用户探索和利用他们的知识库（包括视频和导入笔记）。
 
 工具使用策略：
-- 先用 search_knowledge_base 搜索相关内容再回答
+- 用户明确指定某篇视频笔记或导入文档时，不要跨知识库搜索；用 list_videos_in_kb 定位 ID，再用 get_knowledge_item 读取该条目的完整正文，只依据该正文回答
+- 用户询问主题、概念或跨资料综合问题时，用 search_knowledge_base 搜索相关内容再回答
 - 用户问"有哪些视频/笔记/内容"或"导入了什么"时，用 list_videos_in_kb 列出（同时返回视频和导入笔记）
 - 用户问某分类的总结时，用 summarize_category
 - 用户让你对比几个视频时，先用 list_videos_in_kb 找到 ID，再用 compare_videos
@@ -486,7 +511,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "search_knowledge_base",
-            "description": "语义搜索个人视频知识库，返回相关笔记片段",
+            "description": "搜索个人知识库（视频和导入笔记），返回相关内容片段",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "搜索关键词或问题"}},
@@ -497,12 +522,12 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_video_note",
-            "description": "获取某个视频的完整笔记内容",
+            "name": "get_knowledge_item",
+            "description": "按 ID 获取某个视频笔记或导入文档（PDF、DOCX、TXT、MD）的完整正文",
             "parameters": {
                 "type": "object",
-                "properties": {"video_id": {"type": "string", "description": "视频ID"}},
-                "required": ["video_id"],
+                "properties": {"item_id": {"type": "string", "description": "知识库条目 ID，可通过 list_videos_in_kb 获取"}},
+                "required": ["item_id"],
             },
         },
     },
@@ -561,7 +586,10 @@ _TOOLS = [
 _TOOL_LABELS: dict[str, str] = {
     "search_knowledge_base": "搜索知识库",
     "get_video_note": "读取笔记",
-    "list_videos_in_kb": "列出视频",
+    "get_knowledge_item": "读取知识库正文",
+    # The legacy tool name is kept for model/API compatibility, but the tool
+    # returns both videos and imported notes.
+    "list_videos_in_kb": "列出知识库内容",
     "summarize_category": "汇总分类",
     "compare_videos": "对比视频",
     "search_youtube_videos": "搜索 YouTube",
@@ -650,12 +678,22 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
         if not all_candidates:
             return "知识库中没有相关内容。", None, None
 
-        # Step 4: Rerank with significance boost
-        from processors.significance import get_significance_map
-        sig_map = await asyncio.to_thread(get_significance_map)
-        results = await loop.run_in_executor(
-            None, rerank_with_significance, query, all_candidates, 6, sig_map
-        )
+        # An entity query targets one named paper/note. Do not leak neighboring
+        # documents into its context merely because they share topic keywords.
+        if intent == "entity":
+            all_candidates = all_candidates[:1]
+
+        # Step 4: CrossEncoder reranking is opt-in because its native model can
+        # terminate memory-constrained Windows processes during loading.
+        from config import LOCAL_RAG_MODELS_ENABLED
+        if LOCAL_RAG_MODELS_ENABLED:
+            from processors.significance import get_significance_map
+            sig_map = await asyncio.to_thread(get_significance_map)
+            results = await loop.run_in_executor(
+                None, rerank_with_significance, query, all_candidates, 6, sig_map
+            )
+        else:
+            results = all_candidates[:6]
 
         from storage.vector_store import is_topic_covered
         covered = await asyncio.to_thread(is_topic_covered, query, 1, 1.0)
@@ -683,11 +721,34 @@ async def _execute_tool(name: str, arguments: str, loop, client: AsyncOpenAI, mo
 
         return result_text, None, citations
 
-    if name == "get_video_note":
-        v = get_video(args.get("video_id", ""))
-        if not v:
-            return "未找到该视频", None, None
-        return f"**{v['title']}**\n\n{v.get('insights', '暂无笔记')}", None, None
+    if name in {"get_knowledge_item", "get_video_note"}:
+        # Keep get_video_note as a compatibility alias for saved/model-generated
+        # calls, but resolve both videos and imported documents by ID.
+        item_id = args.get("item_id") or args.get("video_id", "")
+        v = get_video(item_id)
+        if v:
+            source = [{
+                "index": 1,
+                "title": v.get("title", ""),
+                "url": v.get("url", ""),
+                "channel": v.get("channel", ""),
+            }]
+            return f"[来源1] **{v['title']}**\n\n{v.get('insights', '暂无笔记')}", None, source
+
+        from storage.notes_db import get_note as _get_imported_note
+        note = _get_imported_note(item_id)
+        if not note:
+            return "未找到该知识库条目", None, None
+        content = note.get("content", "")
+        if not content.strip():
+            return f"**{note.get('title', '导入笔记')}**\n\n该文档未提取到可读正文。", None, None
+        source = [{
+            "index": 1,
+            "title": note.get("title", ""),
+            "url": note.get("url", f"note://{item_id}"),
+            "channel": note.get("source_file", ""),
+        }]
+        return f"[来源1] **{note.get('title', '导入笔记')}**\n\n{content}", None, source
 
     if name == "list_videos_in_kb":
         category = args.get("category")
@@ -878,7 +939,15 @@ async def chat_stream(req: ChatRequest):
 
                 # Span for this tool call
                 tool_span = tracer.span(trace, f"tool:{tool_name}", input_data=tc["function"]["arguments"][:500])
-                result_str, suggestions, citations = await _execute_tool(tool_name, tc["function"]["arguments"], loop, async_client, active_model)
+                from config import CHAT_TOOL_TIMEOUT_SECONDS
+                try:
+                    result_str, suggestions, citations = await asyncio.wait_for(
+                        _execute_tool(tool_name, tc["function"]["arguments"], loop, async_client, active_model),
+                        timeout=CHAT_TOOL_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    result_str = f"工具执行超过 {CHAT_TOOL_TIMEOUT_SECONDS:g} 秒，已自动停止。请基于现有信息回答。"
+                    suggestions = citations = None
                 tracer.end_span(tool_span, output=result_str[:500])
 
                 if citations:
@@ -890,7 +959,6 @@ async def chat_stream(req: ChatRequest):
                             renumbered.append({**c, "index": len(turn_citations) + len(renumbered) + 1})
                     if renumbered:
                         turn_citations.extend(renumbered)
-                        yield f"data: {json.dumps({'type': 'citations', 'sources': renumbered}, ensure_ascii=False)}\n\n"
 
                 if suggestions:
                     yield f"data: {json.dumps({'type': 'suggestions', 'videos': suggestions}, ensure_ascii=False)}\n\n"
@@ -926,6 +994,10 @@ async def chat_stream(req: ChatRequest):
                         delta = chunk.choices[0].delta.content or ""
                         if delta:
                             yield f"data: {json.dumps({'type': 'text', 'content': delta}, ensure_ascii=False)}\n\n"
+
+        visible_citations = select_cited_sources(accumulated_answer, turn_citations)
+        if visible_citations:
+            yield f"data: {json.dumps({'type': 'citations', 'sources': visible_citations}, ensure_ascii=False)}\n\n"
 
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
         tracer.flush()

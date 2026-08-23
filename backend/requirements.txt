@@ -15,6 +15,7 @@ rank-bm25>=0.2.2
 pypdf>=3.0.0
 reportlab>=4.0.0
 python-docx>=1.0.0
+pywin32>=306; platform_system == "Windows"
 python-multipart>=0.0.9
 PyMySQL==1.1.1
 bcrypt>=4.2.0

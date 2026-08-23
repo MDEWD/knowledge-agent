@@ -141,7 +141,7 @@ export default function NoteImportPanel({ onNoteAdded }: { onNoteAdded?: () => v
               </p>
               <p className="text-xs text-gray-500 mb-4">支持同时上传多个文件</p>
               <div className="flex justify-center gap-2">
-                {['MD', 'PDF', 'TXT', 'DOCX'].map((f) => (
+                {['MD', 'PDF', 'TXT', 'DOCX', 'DOC'].map((f) => (
                   <span key={f} className="px-2.5 py-1 rounded-lg bg-gray-800 border border-gray-700 text-xs text-gray-400 font-mono">
                     {f}
                   </span>
