@@ -91,6 +91,7 @@ set_env DOMAIN "$DOMAIN" .env
 set_env CORS_ORIGINS "https://${DOMAIN}" .env
 if [ -n "$ADMIN_EMAIL" ]; then
   set_env AUTH_ADMIN_EMAILS "$ADMIN_EMAIL" .env
+  set_env DEFAULT_ADMIN_EMAIL "$ADMIN_EMAIL" .env
 fi
 
 # 占位符或为空时才生成，避免覆盖已有真实值
@@ -106,6 +107,24 @@ gen_if_placeholder() {
 gen_if_placeholder AUTH_SECRET_KEY 48
 gen_if_placeholder MYSQL_ROOT_PASSWORD 24
 gen_if_placeholder MYSQL_PASSWORD 24
+
+# Bootstrap administrator. AUTH_ADMIN_EMAILS promotes an existing verified
+# account; DEFAULT_ADMIN_* creates it when the production database is empty.
+BOOTSTRAP_ADMIN_PASSWORD=""
+bootstrap_admin_email="$(grep -E '^DEFAULT_ADMIN_EMAIL=.*' .env | head -n1 | cut -d= -f2-)"
+if [ -z "$bootstrap_admin_email" ]; then
+  bootstrap_admin_email="$(grep -E '^AUTH_ADMIN_EMAILS=.*' .env | head -n1 | cut -d= -f2- | cut -d, -f1)"
+  if [ -n "$bootstrap_admin_email" ]; then
+    set_env DEFAULT_ADMIN_EMAIL "$bootstrap_admin_email" .env
+  fi
+fi
+if [ -n "$bootstrap_admin_email" ]; then
+  current_admin_password="$(grep -E '^DEFAULT_ADMIN_PASSWORD=.*' .env | head -n1 | cut -d= -f2-)"
+  if [ -z "$current_admin_password" ] || [ "$current_admin_password" = "change-this-admin-password" ]; then
+    BOOTSTRAP_ADMIN_PASSWORD="$(rand 18)"
+    set_env DEFAULT_ADMIN_PASSWORD "$BOOTSTRAP_ADMIN_PASSWORD" .env
+  fi
+fi
 
 echo "==> 4/6 检查必填项"
 missing=0
@@ -132,3 +151,10 @@ echo "部署完成！"
 echo "  访问地址: https://${DOMAIN}"
 echo "  查看日志: docker compose logs -f app caddy"
 echo "  首次启动会下载 embedding 模型（约 500MB），请耐心等待几分钟"
+if [ -n "$BOOTSTRAP_ADMIN_PASSWORD" ]; then
+  echo ""
+  echo "默认管理员已配置："
+  echo "  邮箱: ${bootstrap_admin_email}"
+  echo "  初始密码: ${BOOTSTRAP_ADMIN_PASSWORD}"
+  echo "  首次登录后请立即修改密码，并妥善保存服务器上的 .env。"
+fi

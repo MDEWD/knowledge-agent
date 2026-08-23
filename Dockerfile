@@ -3,6 +3,9 @@ FROM node:18-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
+# 淘宝 npm 公共镜像（registry.npmmirror.com 即淘宝镜像的新域名）
+RUN npm config set registry https://registry.npmmirror.com/
+
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 

@@ -41,6 +41,9 @@ services:
       - AUTH_SECRET_KEY=${AUTH_SECRET_KEY}
       - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-false}
       - AUTH_ADMIN_EMAILS=${AUTH_ADMIN_EMAILS:-}
+      # Bootstrap admin (both set → auto-create an admin account on startup)
+      - DEFAULT_ADMIN_EMAIL=${DEFAULT_ADMIN_EMAIL:-}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-}
       # CORS (same-origin deploys can leave empty)
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       # SMTP

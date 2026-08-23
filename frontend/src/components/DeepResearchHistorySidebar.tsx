@@ -9,6 +9,8 @@ interface Props {
   activeSessionId: string | null
   refreshKey: number
   disabled?: boolean
+  mobileOpen?: boolean
+  onMobileClose?: () => void
   onSelect: (sessionId: string) => void
   onNew: () => void
 }
@@ -24,6 +26,8 @@ export default function DeepResearchHistorySidebar({
   activeSessionId,
   refreshKey,
   disabled = false,
+  mobileOpen = false,
+  onMobileClose,
   onSelect,
   onNew,
 }: Props) {
@@ -54,7 +58,13 @@ export default function DeepResearchHistorySidebar({
   }
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r border-gray-800 p-4">
+    <aside className={`deep-history-sidebar fixed inset-y-14 left-0 z-50 flex w-[min(86vw,20rem)] shrink-0 flex-col border-r border-gray-800 bg-gray-900 p-4 shadow-2xl transition-transform duration-200 md:static md:z-auto md:w-72 md:translate-x-0 md:shadow-none ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      <div className="mb-3 flex items-center justify-between md:hidden">
+        <h2 className="text-sm font-semibold text-gray-300">研究会话</h2>
+        <button type="button" onClick={onMobileClose} aria-label="关闭研究会话" className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-800 hover:text-gray-300">
+          <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" className="h-5 w-5"><path d="m6 6 8 8m0-8-8 8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+        </button>
+      </div>
       <button
         onClick={onNew}
         disabled={disabled}
@@ -107,7 +117,7 @@ export default function DeepResearchHistorySidebar({
               disabled={disabled}
               title="删除记录"
               onClick={(event) => void handleDelete(session.id, event)}
-              className="opacity-0 text-xs text-gray-600 transition-opacity hover:text-red-400 group-hover:opacity-100"
+              className="text-xs text-gray-600 opacity-60 transition-opacity hover:text-red-400 md:opacity-0 md:group-hover:opacity-100"
             >
               ✕
             </button>

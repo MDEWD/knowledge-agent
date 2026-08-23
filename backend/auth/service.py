@@ -26,6 +26,8 @@ from config import (
     AUTH_CODE_MINUTES,
     AUTH_CODE_RESEND_SECONDS,
     AUTH_REFRESH_TOKEN_DAYS,
+    DEFAULT_ADMIN_EMAIL,
+    DEFAULT_ADMIN_PASSWORD,
 )
 from storage.mysql_db import get_pool
 
@@ -235,6 +237,79 @@ def revoke_session(refresh_token: str) -> None:
                 str(payload["sub"]),
             ),
         )
+
+
+def ensure_default_admin() -> bool:
+    """Ensure the configured bootstrap administrator exists.
+
+    Creates an active, verified admin when the email is absent. If the email is
+    already registered but cannot currently log in (unverified / not active /
+    not admin), it is promoted and its password reset to the configured value;
+    a healthy admin account is left untouched. Returns True only on creation.
+    """
+    if not DEFAULT_ADMIN_EMAIL or not DEFAULT_ADMIN_PASSWORD:
+        return False
+    try:
+        email = normalise_email(DEFAULT_ADMIN_EMAIL)
+        validate_password(DEFAULT_ADMIN_PASSWORD)
+    except AuthError:
+        return False
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with get_pool().connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, role, status, email_verified_at FROM users WHERE email=%s",
+            (email,),
+        )
+        row = cursor.fetchone()
+        if row:
+            if row["role"] != "admin" or row["status"] != "active" or not row["email_verified_at"]:
+                cursor.execute(
+                    "UPDATE users SET role='admin', status='active', email_verified_at=%s WHERE id=%s",
+                    (now, row["id"]),
+                )
+                cursor.execute(
+                    "UPDATE user_credentials SET password_hash=%s WHERE user_id=%s",
+                    (hash_password(DEFAULT_ADMIN_PASSWORD), row["id"]),
+                )
+            return False
+        user_id = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO users
+                (id, email, display_name, status, role, auth_provider, auth_subject, email_verified_at)
+            VALUES (%s, %s, %s, 'active', 'admin', 'password', %s, %s)
+            """,
+            (user_id, email, "管理员", email, now),
+        )
+        cursor.execute(
+            "INSERT INTO user_credentials (user_id, password_hash) VALUES (%s, %s)",
+            (user_id, hash_password(DEFAULT_ADMIN_PASSWORD)),
+        )
+    return True
+
+
+def ensure_configured_admins() -> int:
+    """Promote existing active, verified accounts listed in AUTH_ADMIN_EMAILS.
+
+    This does not create accounts, verify emails, activate suspended users, or
+    change passwords.
+    """
+    emails = sorted(AUTH_ADMIN_EMAILS)
+    if not emails:
+        return 0
+    placeholders = ",".join(["%s"] * len(emails))
+    with get_pool().connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            UPDATE users SET role='admin'
+            WHERE email IN ({placeholders})
+              AND status='active'
+              AND email_verified_at IS NOT NULL
+              AND role<>'admin'
+            """,
+            tuple(emails),
+        )
+        return int(cursor.rowcount)
 
 
 def _issue_action_code(email: str, purpose: str, *, hide_missing: bool = False) -> tuple[dict, str] | None:

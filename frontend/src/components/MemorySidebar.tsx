@@ -2,9 +2,15 @@ import { useEffect, useState } from 'react'
 import { fetchMemory, updateMemory, resetMemory } from '../api/client'
 import type { UserMemory } from '../types'
 
-export default function MemorySidebar() {
+interface Props {
+  defaultOpen?: boolean
+  hideToggle?: boolean
+  className?: string
+}
+
+export default function MemorySidebar({ defaultOpen = false, hideToggle = false, className = '' }: Props) {
   const [mem, setMem] = useState<UserMemory | null>(null)
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(defaultOpen)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
 
@@ -28,19 +34,21 @@ export default function MemorySidebar() {
   }
 
   return (
-    <div className="border-t border-gray-800 mt-3 pt-3">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between text-xs text-gray-500 hover:text-gray-300 transition-colors py-1"
-      >
-        <span className="flex items-center gap-1.5">
-          <span className={`w-1.5 h-1.5 rounded-full ${hasMem ? 'bg-purple-400' : 'bg-gray-600'}`} />
-          长期记忆
-        </span>
-        <span>{open ? '▲' : '▼'}</span>
-      </button>
+    <div className={`${hideToggle ? '' : 'border-t border-gray-800 mt-3 pt-3'} ${className}`}>
+      {!hideToggle && (
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="w-full flex items-center justify-between text-xs text-gray-500 hover:text-gray-300 transition-colors py-1"
+        >
+          <span className="flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${hasMem ? 'bg-purple-400' : 'bg-gray-600'}`} />
+            长期记忆
+          </span>
+          <span>{open ? '▲' : '▼'}</span>
+        </button>
+      )}
 
-      {open && (
+      {(open || hideToggle) && (
         <div className="mt-2 space-y-2">
           {!hasMem ? (
             <p className="text-xs text-gray-600 py-1">对话后自动积累用户画像</p>

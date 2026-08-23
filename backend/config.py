@@ -58,6 +58,10 @@ AUTH_ADMIN_EMAILS = {
     if value.strip()
 }
 
+# Optional bootstrap administrator, created at startup when both are set.
+DEFAULT_ADMIN_EMAIL = os.environ.get("DEFAULT_ADMIN_EMAIL", "").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.environ.get("DEFAULT_ADMIN_PASSWORD", "")
+
 # SMTP is optional for local development. Without SMTP, verification codes are
 # written to the backend terminal; production deployments should configure it.
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
@@ -106,6 +110,18 @@ EMBED_MODEL = os.environ.get(
 EMBED_LOCAL_FILES_ONLY = os.environ.get(
     "EMBED_LOCAL_FILES_ONLY", "false"
 ).lower() in {"1", "true", "yes", "on"}
+# Importing a large PDF must not force-load the native SentenceTransformer
+# runtime. BM25 indexing remains available; enable this only on machines with
+# enough memory and a working local embedding model.
+NOTE_IMPORT_VECTOR_INDEX = os.environ.get(
+    "NOTE_IMPORT_VECTOR_INDEX", "false"
+).lower() in {"1", "true", "yes", "on"}
+# Local SentenceTransformer/CrossEncoder models use native runtimes and can
+# terminate memory-constrained Windows processes. BM25 remains the safe default.
+LOCAL_RAG_MODELS_ENABLED = os.environ.get(
+    "LOCAL_RAG_MODELS_ENABLED", "false"
+).lower() in {"1", "true", "yes", "on"}
+CHAT_TOOL_TIMEOUT_SECONDS = float(os.environ.get("CHAT_TOOL_TIMEOUT_SECONDS", "45"))
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 MAX_TRANSCRIPT_CHARS = int(os.environ.get("MAX_TRANSCRIPT_CHARS", "80000"))
 

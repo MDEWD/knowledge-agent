@@ -7,7 +7,7 @@ from typing import Optional
 import chromadb
 from chromadb.utils import embedding_functions
 
-from config import CHROMA_DB_PATH, EMBED_LOCAL_FILES_ONLY, EMBED_MODEL
+from config import CHROMA_DB_PATH, EMBED_LOCAL_FILES_ONLY, EMBED_MODEL, LOCAL_RAG_MODELS_ENABLED
 from config import DEFAULT_USER_ID
 from auth.context import get_current_user_id
 from storage import bm25_store
@@ -19,6 +19,10 @@ _client = None
 _embedding_function = None
 _init_lock = threading.Lock()
 _legacy_ownership_migrated = False
+# Keep embedding requests bounded.  Chroma embeds the whole upsert payload
+# before writing it; a long imported PDF can otherwise spike RAM and get the
+# Windows backend process terminated by the OS.
+_UPSERT_BATCH_SIZE = 32
 
 
 def _assign_legacy_documents(collection: chromadb.Collection) -> None:
@@ -155,8 +159,35 @@ def add_note_document(text: str, metadata: dict) -> None:
         metas.append(chunk_meta)
         bm25_items.append({"id": doc_id, "text": chunk, "metadata": chunk_meta})
 
-    col.upsert(ids=ids, documents=docs, metadatas=metas)
+    # Do not embed an entire note in one request.  SentenceTransformer keeps
+    # the input tensors alive for the duration of the call, so the peak is
+    # proportional to the number of chunks in the note.
+    for start in range(0, len(ids), _UPSERT_BATCH_SIZE):
+        end = start + _UPSERT_BATCH_SIZE
+        col.upsert(
+            ids=ids[start:end],
+            documents=docs[start:end],
+            metadatas=metas[start:end],
+        )
     bm25_store.add_documents(bm25_items)
+
+
+def add_note_bm25_document(text: str, metadata: dict) -> None:
+    """Index an imported note without loading the native embedding runtime."""
+    user_id = get_current_user_id()
+    bm25_store.add_documents([{
+        "id": hashlib.md5(f"{user_id}:{metadata['url']}_0".encode()).hexdigest(),
+        "text": text,
+        "metadata": {
+            "title": metadata.get("title", ""),
+            "url": metadata.get("url", ""),
+            "channel": metadata.get("channel", ""),
+            "platform": metadata.get("platform", ""),
+            "video_id": metadata.get("id", ""),
+            "chunk_index": 0,
+            "user_id": user_id,
+        },
+    }])
 
 
 def delete_document(video_url: str) -> None:
@@ -211,21 +242,21 @@ def search(query: str, n_results: int = 6) -> list[dict]:
     candidate_n = min(n_results * 3, 20)
     user_id = get_current_user_id()
 
-    # Dense (semantic) search
+    # Dense retrieval is opt-in: loading SentenceTransformer can terminate the
+    # whole process at native/OOM level, which Python cannot catch.
     dense_items: list[dict] = []
-    try:
-        col = _get_collection()
-        results = col.query(
-            query_texts=[query],
-            n_results=candidate_n,
-            where={"user_id": user_id},
-        )
-        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-            dense_items.append({"content": doc, "metadata": meta})
-    except Exception as exc:
-        # Dense retrieval is optional for reads. Keep research available via
-        # BM25 when Chroma or the local embedding model is temporarily down.
-        logger.warning("Dense search unavailable; falling back to BM25: %s", exc)
+    if LOCAL_RAG_MODELS_ENABLED:
+        try:
+            col = _get_collection()
+            results = col.query(
+                query_texts=[query],
+                n_results=candidate_n,
+                where={"user_id": user_id},
+            )
+            for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+                dense_items.append({"content": doc, "metadata": meta})
+        except Exception as exc:
+            logger.warning("Dense search unavailable; falling back to BM25: %s", exc)
 
     # Sparse (BM25) search
     sparse_items: list[dict] = []
@@ -256,6 +287,8 @@ def is_topic_covered(query: str, min_chunks: int = 2, max_distance: float = 1.0)
     Unrelated topics (e.g. "AI Agent" vs economics corpus) typically score
     L2 > 1.2, so they are correctly rejected.
     """
+    if not LOCAL_RAG_MODELS_ENABLED:
+        return len(bm25_store.search(query, n=min_chunks)) >= min_chunks
     col = _get_collection()
     try:
         results = col.query(
@@ -273,6 +306,8 @@ def is_topic_covered(query: str, min_chunks: int = 2, max_distance: float = 1.0)
 # ── Related videos (dense only — title similarity doesn't benefit from BM25) ──
 
 def find_related(video_id: str, title: str, n: int = 3) -> list[dict]:
+    if not LOCAL_RAG_MODELS_ENABLED:
+        return []
     col = _get_collection()
     try:
         results = col.query(
